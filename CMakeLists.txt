@@ -189,7 +189,9 @@ ENDIF(QUAKE_USE_LSAN)
 # ---------------------------------------------------------------
 find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
 file(GLOB_RECURSE BINDINGS ${project_BINDINGS_DIR}/*.cpp)
-pybind11_add_module(_bindings ${BINDINGS})
+# Binding LTO makes incremental instrumentation builds take minutes and has no
+# effect on the measured Quake kernels, which live in libquake_c.
+pybind11_add_module(_bindings NO_EXTRAS ${BINDINGS})
 set_target_properties(_bindings PROPERTIES LINKER_LANGUAGE CXX)
 target_link_libraries(_bindings PRIVATE ${PROJECT_NAME} ${TORCH_PYTHON_LIBRARY})
 add_custom_target(bindings)

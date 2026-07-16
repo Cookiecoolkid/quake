@@ -184,6 +184,18 @@ void QuakeIndex::initialize_maintenance_policy(shared_ptr<MaintenancePolicyParam
     }
 }
 
+void QuakeIndex::set_cxl_resource_price_snapshot(
+    shared_ptr<CxlResourcePriceSnapshot> snapshot) {
+    if (!maintenance_policy_) {
+        throw std::runtime_error(
+            "[QuakeIndex::set_cxl_resource_price_snapshot()] No maintenance policy set.");
+    }
+    maintenance_policy_->set_cxl_resource_price_snapshot(snapshot);
+    if (parent_ && parent_->maintenance_policy_) {
+        parent_->maintenance_policy_->set_cxl_resource_price_snapshot(snapshot);
+    }
+}
+
 shared_ptr<MaintenanceTimingInfo> QuakeIndex::maintenance() {
     if (!maintenance_policy_) {
         throw std::runtime_error("[QuakeIndex::maintenance()] No maintenance policy set.");
@@ -196,6 +208,15 @@ shared_ptr<MaintenanceTimingInfo> QuakeIndex::maintenance() {
     }
 
     return maintenance_info;
+}
+
+void QuakeIndex::record_cxl_update_counts(int64_t add_count, int64_t delete_count) {
+    if (maintenance_policy_) {
+        maintenance_policy_->record_cxl_update_counts(add_count, delete_count);
+    }
+    if (parent_ && parent_->maintenance_policy_) {
+        parent_->maintenance_policy_->record_cxl_update_counts(add_count, delete_count);
+    }
 }
 
 bool QuakeIndex::validate() {
@@ -326,6 +347,21 @@ int64_t QuakeIndex::nlist() {
         return partition_manager_->nlist();
     }
     return 0;
+}
+
+Tensor QuakeIndex::partition_ids() {
+    if (!partition_manager_) {
+        throw std::runtime_error("[QuakeIndex::partition_ids()] No partition manager. Index not built?");
+    }
+    return partition_manager_->get_partition_ids();
+}
+
+Tensor QuakeIndex::partition_sizes() {
+    if (!partition_manager_) {
+        throw std::runtime_error("[QuakeIndex::partition_sizes()] No partition manager. Index not built?");
+    }
+    Tensor ids = partition_manager_->get_partition_ids();
+    return partition_manager_->get_partition_sizes(ids);
 }
 
 int QuakeIndex::d() {

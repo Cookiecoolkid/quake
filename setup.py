@@ -49,6 +49,9 @@ class CMakeBuild(build_ext):
         cmake_args += ["-DCMAKE_BUILD_WITH_INSTALL_RPATH=TRUE"]
         cmake_args += ["-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=TRUE"]
         cmake_args += ["-DQUAKE_SET_ABI_MODE=ON"]
+        cmake_args += ["-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
+        cmake_args += ["-DBUILD_TESTING=OFF"]
+        cmake_args += ["-DFAISS_ENABLE_PYTHON=OFF"]
 
         try:
             import torch

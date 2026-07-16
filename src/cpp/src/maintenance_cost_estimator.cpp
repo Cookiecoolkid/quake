@@ -367,7 +367,11 @@ bool ListScanLatencyEstimator::load_latency_profile(const std::string &filename)
 }
 
 
-MaintenanceCostEstimator::MaintenanceCostEstimator(int d, float alpha, int k)
+MaintenanceCostEstimator::MaintenanceCostEstimator(
+    int d,
+    float alpha,
+    int k,
+    const std::string &profile_filename)
     : d_(d), alpha_(alpha), k_(k) {
     if (k_ <= 0) {
         throw std::invalid_argument("k must be positive");
@@ -380,7 +384,9 @@ MaintenanceCostEstimator::MaintenanceCostEstimator(int d, float alpha, int k)
         d_,
         DEFAULT_LATENCY_ESTIMATOR_RANGE_N,
         DEFAULT_LATENCY_ESTIMATOR_RANGE_K,
-        DEFAULT_LATENCY_ESTIMATOR_NTRIALS);
+        DEFAULT_LATENCY_ESTIMATOR_NTRIALS,
+        false,
+        profile_filename);
 }
 
 float MaintenanceCostEstimator::compute_split_delta(int partition_size, float hit_rate, int total_partitions) const {

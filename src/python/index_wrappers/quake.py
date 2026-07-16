@@ -159,6 +159,7 @@ class QuakeWrapper(IndexWrapper):
         sample_prefix=0,
         sample_stride=5,
         batch_size=128,
+        deterministic_serial_scan=False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Find the k-nearest neighbors of the query vectors.
@@ -182,6 +183,7 @@ class QuakeWrapper(IndexWrapper):
         search_params.sample_prefix = sample_prefix
         search_params.sample_stride = sample_stride
         search_params.batch_size = batch_size
+        search_params.deterministic_serial_scan = deterministic_serial_scan
 
         if parent is not None:
             search_params.parent_params = quake.SearchParams()
@@ -228,8 +230,12 @@ class QuakeWrapper(IndexWrapper):
         self.index = QuakeIndex()
         build_params = quake.IndexBuildParams()
         build_params.num_workers = num_workers
+        build_params.num_merge_workers = num_merge_workers
         build_params.use_numa = use_numa
         build_params.parent_params = quake.IndexBuildParams()
+        build_params.parent_params.num_workers = num_workers
+        build_params.parent_params.num_merge_workers = num_merge_workers
+        build_params.parent_params.use_numa = use_numa
         if parent is not None:
             build_params.parent_params.num_workers = parent.get("num_workers", 0)
             build_params.parent_params.num_merge_workers = parent.get("num_merge_workers", 1)
@@ -252,6 +258,14 @@ class QuakeWrapper(IndexWrapper):
         :return: The cluster ids of the index
         """
         return self.index.cluster_assignments()
+
+    def partition_ids(self) -> torch.Tensor:
+        """Return active partition IDs in partition-store order."""
+        return self.index.partition_ids()
+
+    def partition_sizes(self) -> torch.Tensor:
+        """Return physical sizes aligned with :meth:`partition_ids`."""
+        return self.index.partition_sizes()
 
     def metric(self) -> str:
         """

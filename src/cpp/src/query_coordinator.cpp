@@ -1087,21 +1087,25 @@ void QueryCoordinator::drain_and_apply_aps(Tensor                      queries,
 
     }
 
-    if (search_params->track_hits && maintenance_policy_) {
-        size_t partitions_per_query = partition_ids.size(1);
-        for (int64_t q = 0; q < nQ; ++q) {
-            std::vector<int64_t> scanned_ids;
-            scanned_ids.reserve(partitions_per_query);
-            for (int p = 0; p < partitions_per_query; ++p) {
-                if (job_flags_[q][p].load(std::memory_order_relaxed)) {
-                    int64_t pid = partition_ids[q][p].item<int64_t>();
-                    if (pid < 0) continue;
-                    scanned_ids.emplace_back(pid);
-                } 
+    size_t partitions_per_query = partition_ids.size(1);
+    timing->partitions_scanned = 0;
+    timing->scanned_partition_ids.clear();
+    timing->scanned_partition_ids.reserve(nQ);
+    for (int64_t q = 0; q < nQ; ++q) {
+        std::vector<int64_t> scanned_ids;
+        scanned_ids.reserve(partitions_per_query);
+        for (int p = 0; p < partitions_per_query; ++p) {
+            if (job_flags_[q][p].load(std::memory_order_relaxed)) {
+                int64_t pid = partition_ids[q][p].item<int64_t>();
+                if (pid < 0) continue;
+                scanned_ids.emplace_back(pid);
             }
-            timing->partitions_scanned += scanned_ids.size();
+        }
+        timing->partitions_scanned += scanned_ids.size();
+        if (search_params->track_hits && maintenance_policy_) {
             maintenance_policy_->record_query_hits(scanned_ids);
         }
+        timing->scanned_partition_ids.emplace_back(std::move(scanned_ids));
     }
 }
 
@@ -1460,6 +1464,8 @@ shared_ptr<SearchResult> QueryCoordinator::serial_scan(Tensor x, Tensor partitio
     timing_info->n_queries = num_queries;
     timing_info->n_clusters = partition_manager_->nlist();
     timing_info->search_params = search_params;
+    timing_info->partitions_scanned = 0;
+    timing_info->scanned_partition_ids.resize(num_queries);
 
     bool is_descending = (metric_ == faiss::METRIC_INNER_PRODUCT);
     bool use_aps = (search_params->recall_target > 0.0 && parent_);
@@ -1587,7 +1593,10 @@ shared_ptr<SearchResult> QueryCoordinator::serial_scan(Tensor x, Tensor partitio
             }
         }
 
-        timing_info->partitions_scanned = scanned_ids.size();
+        timing_info->partitions_scanned += scanned_ids.size();
+        timing_info->scanned_partition_ids[q] = scanned_ids;
+        timing_info->scan_time_ns += scan_time;
+        timing_info->aps_time_ns += aps_time;
 
         if (search_params->track_hits && maintenance_policy_) {
             if (debug_) std::cout << "[QueryCoordinator::serial_scan] record_query_hits being called with " << scanned_ids.size() << " ids" << std::endl;
@@ -1722,6 +1731,9 @@ shared_ptr<SearchResult> QueryCoordinator::scan_partitions(Tensor x, Tensor part
     }
     if (partition_ids.dim() == 1) {
         partition_ids = partition_ids.unsqueeze(0).expand({x.size(0), partition_ids.size(0)});
+    }
+    if (search_params && search_params->deterministic_serial_scan) {
+        return serial_scan(x, partition_ids, search_params);
     }
     if (workers_initialized_) {
         if (debug_) std::cout << "[QueryCoordinator::scan_partitions] Using worker-based scan." << std::endl;

@@ -107,6 +107,55 @@ constexpr float DEFAULT_DELETE_THRESHOLD_NS = 100.0f;   ///< Default threshold i
 constexpr float DEFAULT_SPLIT_THRESHOLD_NS = 100.0f;    ///< Default threshold in nanoseconds for split decisions.
 constexpr float DEFAULT_PARTITION_REDUCTION_THRESHOLD = 0.3;
 constexpr float DEFAULT_CHURN_RECLUSTER_THRESHOLD = 0.4;
+constexpr bool DEFAULT_ENABLE_CXL_COST_MODEL = false;
+constexpr int DEFAULT_CXL_NUM_MCS = 4;
+constexpr int DEFAULT_CXL_LINE_BYTES = 64;
+constexpr int DEFAULT_CXL_ENTRY_BYTES = 517;
+constexpr int DEFAULT_CXL_METADATA_BYTES = 8;
+constexpr float DEFAULT_CXL_MC_BW_BYTES_PER_NS = 16.0f;
+constexpr float DEFAULT_CXL_LINK_BW_BYTES_PER_NS = 32.0f;
+constexpr float DEFAULT_CXL_MAINTENANCE_BANDWIDTH_FRACTION = 0.10f;
+constexpr float DEFAULT_CXL_SPLIT_SCORE_WEIGHT = 1.0f;
+constexpr float DEFAULT_CXL_MAINTENANCE_PENALTY_WEIGHT = 1.0f;
+constexpr float DEFAULT_CXL_FANOUT_PENALTY_NS = 1024.0f;
+constexpr float DEFAULT_CXL_FANOUT_PENALTY_WEIGHT = 0.0f;
+constexpr bool DEFAULT_CXL_WORKLOAD_ADAPTIVE = false;
+constexpr float DEFAULT_CXL_ADAPTIVE_EWMA_ALPHA = 0.2f;
+constexpr float DEFAULT_CXL_ADAPTIVE_GROWTH_SPLIT_GAIN = 1.5f;
+constexpr float DEFAULT_CXL_ADAPTIVE_CHURN_SPLIT_GAIN = 1.0f;
+constexpr float DEFAULT_CXL_ADAPTIVE_SCAN_SPLIT_GAIN = 0.5f;
+constexpr float DEFAULT_CXL_ADAPTIVE_MAINTENANCE_PENALTY_GAIN = 1.0f;
+constexpr float DEFAULT_CXL_ADAPTIVE_DELETE_RELIEF_GAIN = 1.0f;
+constexpr float DEFAULT_CXL_ADAPTIVE_FANOUT_GROWTH_GAIN = 1.0f;
+constexpr bool DEFAULT_CXL_WORKLOAD_ADAPTIVE_V2 = false;
+constexpr float DEFAULT_CXL_ADAPTIVE_ROI_THRESHOLD = 1.0f;
+constexpr float DEFAULT_CXL_ADAPTIVE_MIN_GAIN_NS = 50.0f;
+constexpr float DEFAULT_CXL_ADAPTIVE_ACTION_OVERHEAD_NS = 100000.0f;
+constexpr float DEFAULT_CXL_ADAPTIVE_BASE_SPLIT_BUDGET_FRACTION = 0.025f;
+constexpr float DEFAULT_CXL_ADAPTIVE_MAX_SPLIT_BUDGET_FRACTION = 0.10f;
+constexpr int DEFAULT_CXL_ADAPTIVE_MIN_SPLIT_BUDGET = 8;
+constexpr int DEFAULT_CXL_ADAPTIVE_MAX_SPLIT_BUDGET = 512;
+constexpr int DEFAULT_CXL_ADAPTIVE_TARGET_PARTITION_SIZE = 0;
+constexpr float DEFAULT_CXL_ADAPTIVE_GROWTH_DEBT_REPAY_FRACTION = 0.15f;
+constexpr float DEFAULT_CXL_ADAPTIVE_STRUCTURAL_SIZE_RATIO = 1.10f;
+constexpr float DEFAULT_CXL_ADAPTIVE_PARTITION_COUNT_SLACK = 0.05f;
+constexpr int DEFAULT_CXL_ADAPTIVE_MAX_REASSIGN_BUDGET = 128;
+constexpr bool DEFAULT_CXL_ADAPTIVE_OBSERVED_COST_ENABLED = true;
+constexpr float DEFAULT_CXL_ADAPTIVE_OBSERVED_COST_ALPHA = 0.4f;
+constexpr float DEFAULT_CXL_ADAPTIVE_MAINTENANCE_TIME_BUDGET_FRACTION = 0.10f;
+constexpr int DEFAULT_CXL_ADAPTIVE_WARMUP_SPLIT_BUDGET = 16;
+constexpr const char* DEFAULT_CXL_ADAPTIVE_REFINEMENT_MODE = "full";
+constexpr int DEFAULT_CXL_ADAPTIVE_MAX_REFINE_SPLITS = 16;
+constexpr float DEFAULT_CXL_ADAPTIVE_MAX_PAYBACK_WINDOWS = 8.0f;
+constexpr bool DEFAULT_CXL_ADAPTIVE_APS_FEEDBACK_ENABLED = false;
+constexpr bool DEFAULT_CXL_ADAPTIVE_REASSIGN_TIME_BUDGET_ENABLED = false;
+constexpr int DEFAULT_CXL_ADAPTIVE_WARMUP_REASSIGN_BUDGET = 16;
+constexpr bool DEFAULT_CXL_STREAMING_RENT_BUY = false;
+constexpr bool DEFAULT_CXL_STREAMING_STAGED = false;
+constexpr bool DEFAULT_CXL_RESOURCE_RENT_BUY = false;
+constexpr bool DEFAULT_CXL_SEARCH_FIRST = false;
+constexpr float DEFAULT_CXL_SEARCH_FIRST_GAIN_TARGET = 0.90f;
+constexpr int DEFAULT_CXL_SEARCH_FIRST_MAX_COHORT = 24;
 
 const vector<int> DEFAULT_LATENCY_ESTIMATOR_RANGE_N = {1, 2, 4, 16, 64, 256, 1024, 4096, 16384, 65536};   ///< Default range of n values for latency estimator.
 const vector<int> DEFAULT_LATENCY_ESTIMATOR_RANGE_K = {1, 4, 16, 64, 256};                                ///< Default range of k values for latency estimator.
@@ -114,6 +163,72 @@ constexpr int DEFAULT_LATENCY_ESTIMATOR_NTRIALS = 5;                            
 
 // macros
 #define DEBUG_PRINT(x) std::cout << #x << " = " << x << std::endl;
+
+struct CxlResourcePrice {
+    string resource_id;
+    float byte_price_ns = 0.0f;
+    float op_price_ns = 0.0f;
+    float utilization = 0.0f;
+    // Prior-window byte demand lets online admission project an added logical
+    // split without observing a future query window.
+    int64_t demand_bytes = 0;
+};
+
+struct CxlResourcePriceSnapshot {
+    int64_t window_id = -1;
+    int64_t window_duration_ns = 0;
+    vector<CxlResourcePrice> resources;
+    vector<float> home_read_byte_price_ns;
+    vector<float> home_read_op_price_ns;
+    unordered_map<int64_t, int> list_home_ids;
+    float maintenance_read_byte_price_ns = 0.0f;
+    float maintenance_write_byte_price_ns = 0.0f;
+    float routing_metadata_shadow_price_ns_per_byte = 0.0f;
+    float dram_shadow_price_ns_per_byte = 0.0f;
+    bool valid = false;
+};
+
+struct CxlPolicyDecision {
+    string action_kind;
+    int64_t partition_id = -1;
+    int home_id = -1;
+    int64_t records = 0;
+    float cost_before_ns = 0.0f;
+    float cost_after_ns = 0.0f;
+    float rent_ns = 0.0f;
+    float buy_ns = 0.0f;
+    float credit_ns = 0.0f;
+    float rent_buy_ratio = 0.0f;
+    float native_rent_ns = 0.0f;
+    float resource_rent_ns = 0.0f;
+    bool native_legal = false;
+    bool cxl_search_profitable = false;
+    float read_line_bytes = 0.0f;
+    float write_line_bytes = 0.0f;
+    int64_t cohort_id = -1;
+    int64_t cohort_size = 0;
+    float cohort_credit_ns = 0.0f;
+    float cohort_variable_buy_ns = 0.0f;
+    float cohort_shared_buy_ns = 0.0f;
+    float cohort_buy_ns = 0.0f;
+    float cohort_rent_buy_ratio = 0.0f;
+    float cohort_search_gain_ns = 0.0f;
+    float cohort_search_gain_fraction = 0.0f;
+    bool selected = false;
+    string rejection_reason;
+};
+
+// Exact semantic lineage for a physical Quake split.  This is deliberately
+// data-free: the replay needs child identity, final membership shape, and
+// source-order gather properties, not vector payloads.
+struct CxlSplitLineage {
+    int64_t parent_id = -1;
+    vector<int64_t> child_ids;
+    vector<int64_t> final_child_sizes;
+    vector<int64_t> source_order_gather_run_counts;
+    vector<int64_t> child_logical_line_footprint;
+    int64_t membership_bitmap_bytes = 0;
+};
 
 struct MaintenancePolicyParams {
     std::string maintenance_policy = DEFAULT_MAINTENANCE_POLICY;
@@ -128,9 +243,86 @@ struct MaintenancePolicyParams {
     float partition_reduction_threshold = DEFAULT_PARTITION_REDUCTION_THRESHOLD;
     float delete_threshold_ns = DEFAULT_DELETE_THRESHOLD_NS;
     float split_threshold_ns = DEFAULT_SPLIT_THRESHOLD_NS;
+    // Optional shared CPU scan profile. Experiments should reuse one profile
+    // so concurrent process load cannot change the native Quake baseline.
+    std::string latency_profile_path;
 
     // SPFresh Param
     int max_partition_size = -1; // -1 means default to standard cost-based maintenance, if set then we use size-based thresholding
+
+    // CXL-aware maintenance extension. Disabled by default to preserve Quake behavior.
+    bool enable_cxl_cost_model = DEFAULT_ENABLE_CXL_COST_MODEL;
+    int cxl_num_mcs = DEFAULT_CXL_NUM_MCS;
+    int cxl_line_bytes = DEFAULT_CXL_LINE_BYTES;
+    int cxl_entry_bytes = DEFAULT_CXL_ENTRY_BYTES;
+    int cxl_metadata_bytes = DEFAULT_CXL_METADATA_BYTES;
+    std::string cxl_scan_mode = "fpga_scan";
+    float cxl_mc_bw_bytes_per_ns = DEFAULT_CXL_MC_BW_BYTES_PER_NS;
+    float cxl_link_bw_bytes_per_ns = DEFAULT_CXL_LINK_BW_BYTES_PER_NS;
+    float cxl_maintenance_bandwidth_fraction = DEFAULT_CXL_MAINTENANCE_BANDWIDTH_FRACTION;
+    float cxl_split_score_weight = DEFAULT_CXL_SPLIT_SCORE_WEIGHT;
+    float cxl_maintenance_penalty_weight = DEFAULT_CXL_MAINTENANCE_PENALTY_WEIGHT;
+    float cxl_fanout_penalty_ns = DEFAULT_CXL_FANOUT_PENALTY_NS;
+    float cxl_fanout_penalty_weight = DEFAULT_CXL_FANOUT_PENALTY_WEIGHT;
+    bool cxl_workload_adaptive = DEFAULT_CXL_WORKLOAD_ADAPTIVE;
+    float cxl_adaptive_ewma_alpha = DEFAULT_CXL_ADAPTIVE_EWMA_ALPHA;
+    float cxl_adaptive_growth_split_gain = DEFAULT_CXL_ADAPTIVE_GROWTH_SPLIT_GAIN;
+    float cxl_adaptive_churn_split_gain = DEFAULT_CXL_ADAPTIVE_CHURN_SPLIT_GAIN;
+    float cxl_adaptive_scan_split_gain = DEFAULT_CXL_ADAPTIVE_SCAN_SPLIT_GAIN;
+    float cxl_adaptive_maintenance_penalty_gain = DEFAULT_CXL_ADAPTIVE_MAINTENANCE_PENALTY_GAIN;
+    float cxl_adaptive_delete_relief_gain = DEFAULT_CXL_ADAPTIVE_DELETE_RELIEF_GAIN;
+    float cxl_adaptive_fanout_growth_gain = DEFAULT_CXL_ADAPTIVE_FANOUT_GROWTH_GAIN;
+    bool cxl_workload_adaptive_v2 = DEFAULT_CXL_WORKLOAD_ADAPTIVE_V2;
+    float cxl_adaptive_roi_threshold = DEFAULT_CXL_ADAPTIVE_ROI_THRESHOLD;
+    float cxl_adaptive_min_gain_ns = DEFAULT_CXL_ADAPTIVE_MIN_GAIN_NS;
+    float cxl_adaptive_action_overhead_ns = DEFAULT_CXL_ADAPTIVE_ACTION_OVERHEAD_NS;
+    float cxl_adaptive_base_split_budget_fraction = DEFAULT_CXL_ADAPTIVE_BASE_SPLIT_BUDGET_FRACTION;
+    float cxl_adaptive_max_split_budget_fraction = DEFAULT_CXL_ADAPTIVE_MAX_SPLIT_BUDGET_FRACTION;
+    int cxl_adaptive_min_split_budget = DEFAULT_CXL_ADAPTIVE_MIN_SPLIT_BUDGET;
+    int cxl_adaptive_max_split_budget = DEFAULT_CXL_ADAPTIVE_MAX_SPLIT_BUDGET;
+    int cxl_adaptive_target_partition_size = DEFAULT_CXL_ADAPTIVE_TARGET_PARTITION_SIZE;
+    float cxl_adaptive_growth_debt_repay_fraction = DEFAULT_CXL_ADAPTIVE_GROWTH_DEBT_REPAY_FRACTION;
+    float cxl_adaptive_structural_size_ratio = DEFAULT_CXL_ADAPTIVE_STRUCTURAL_SIZE_RATIO;
+    float cxl_adaptive_partition_count_slack = DEFAULT_CXL_ADAPTIVE_PARTITION_COUNT_SLACK;
+    int cxl_adaptive_max_reassign_budget = DEFAULT_CXL_ADAPTIVE_MAX_REASSIGN_BUDGET;
+    bool cxl_adaptive_observed_cost_enabled = DEFAULT_CXL_ADAPTIVE_OBSERVED_COST_ENABLED;
+    float cxl_adaptive_observed_cost_alpha = DEFAULT_CXL_ADAPTIVE_OBSERVED_COST_ALPHA;
+    float cxl_adaptive_maintenance_time_budget_fraction =
+        DEFAULT_CXL_ADAPTIVE_MAINTENANCE_TIME_BUDGET_FRACTION;
+    int cxl_adaptive_warmup_split_budget = DEFAULT_CXL_ADAPTIVE_WARMUP_SPLIT_BUDGET;
+    std::string cxl_adaptive_refinement_mode = DEFAULT_CXL_ADAPTIVE_REFINEMENT_MODE;
+    int cxl_adaptive_max_refine_splits = DEFAULT_CXL_ADAPTIVE_MAX_REFINE_SPLITS;
+    float cxl_adaptive_max_payback_windows = DEFAULT_CXL_ADAPTIVE_MAX_PAYBACK_WINDOWS;
+    bool cxl_adaptive_aps_feedback_enabled = DEFAULT_CXL_ADAPTIVE_APS_FEEDBACK_ENABLED;
+    bool cxl_adaptive_reassign_time_budget_enabled =
+        DEFAULT_CXL_ADAPTIVE_REASSIGN_TIME_BUDGET_ENABLED;
+    int cxl_adaptive_warmup_reassign_budget = DEFAULT_CXL_ADAPTIVE_WARMUP_REASSIGN_BUDGET;
+    // Online policy: recurrent query savings accumulate until they pay for an
+    // observed (or mechanistically estimated) maintenance action. It uses the
+    // existing window size and maintenance bandwidth fraction, without the v2
+    // pressure weights and per-workload budget knobs.
+    bool cxl_streaming_rent_buy = DEFAULT_CXL_STREAMING_RENT_BUY;
+    // Coherent descriptor/view policy.  It has no fixed action-count or
+    // search-gain target; resource-priced admission is evaluated online.
+    bool cxl_streaming_staged = DEFAULT_CXL_STREAMING_STAGED;
+    // Resource-priced variant. Prices are supplied causally from the previous
+    // completed workload window through CxlResourcePriceSnapshot.
+    bool cxl_resource_rent_buy = DEFAULT_CXL_RESOURCE_RENT_BUY;
+    // Search-first resource policy. Prior-window CXL prices and observed APS
+    // probes define the split candidates and their search benefit. Native
+    // Quake cost is telemetry only; CXL maintenance cost orders and truncates
+    // the cohort but is not a mandatory one-window payback gate.
+    bool cxl_search_first = DEFAULT_CXL_SEARCH_FIRST;
+    float cxl_search_first_gain_target = DEFAULT_CXL_SEARCH_FIRST_GAIN_TARGET;
+    int cxl_search_first_max_cohort = DEFAULT_CXL_SEARCH_FIRST_MAX_COHORT;
+    // Audit-only override for replaying a candidate-set prefix from the same
+    // checkpoint. Empty vectors with this flag set mean no optional actions.
+    bool cxl_resource_force_action_set = false;
+    // Restrict the audit override to one resource-price window. A negative
+    // value preserves the legacy behavior of applying it to every window.
+    int64_t cxl_resource_force_window_id = -1;
+    vector<int64_t> cxl_resource_forced_split_ids;
+    vector<int64_t> cxl_resource_forced_reassign_ids;
 
     MaintenancePolicyParams() = default;
 };
@@ -202,6 +394,7 @@ struct SearchParams {
 
     bool track_hits = true;
     bool scan_all = false;
+    bool deterministic_serial_scan = false;
 
     // APS params
     bool use_precomputed = DEFAULT_PRECOMPUTED;
@@ -257,6 +450,7 @@ struct SearchTimingInfo {
     int64_t n_queries; ///< Number of queries.
     int64_t n_clusters; ///< Number of clusters (nlist).
     int partitions_scanned; ///< Number of partitions scanned.
+    std::vector<std::vector<int64_t>> scanned_partition_ids; ///< Actual partition ids scanned per query.
     shared_ptr<SearchParams> search_params = nullptr; ///< Search parameters.
     shared_ptr<SearchTimingInfo> parent_info = nullptr; ///< Timing info for the parent index, if any.
 
@@ -298,15 +492,91 @@ struct SearchTimingInfo {
  * @brief Structure to hold timing information for maintenance operations.
  */
 struct MaintenanceTimingInfo {
-    int64_t n_splits; ///< Number of splits.
-    int64_t n_deletes; ///< Number of merges.
-    int64_t n_recluster; ///< Number of reclusters
+    int64_t n_splits = 0; ///< Number of splits.
+    int64_t n_deletes = 0; ///< Number of merge-like reassignments.
+    int64_t n_recluster = 0; ///< Number of reclusters.
 
-    int64_t delete_time_us; ///< Time spent on deletions in microseconds.
-    int64_t split_time_us; ///< Time spent on splits in microseconds.
-    int64_t refinement_time_us; ///< Time spent on refinement in microseconds.
-    int64_t recluster_time_us; ///< Time spent on reclustering
-    int64_t total_time_us; ///< Total time spent in microseconds.
+    int64_t decision_time_us = 0; ///< Time spent selecting maintenance actions.
+    int64_t action_time_us = 0; ///< Time spent executing committed actions.
+    int64_t delete_time_us = 0; ///< Time spent on deletions in microseconds.
+    int64_t split_time_us = 0; ///< Time spent on splits in microseconds.
+    int64_t refinement_time_us = 0; ///< Time spent on refinement of split output.
+    int64_t recluster_time_us = 0; ///< Time spent on reclustering.
+    int64_t total_time_us = 0; ///< Total time spent in microseconds.
+
+    int64_t decision_partition_count = 0;
+    int64_t centroid_update_count = 0;
+    int64_t delete_candidate_count = 0;
+    int64_t delete_candidate_records = 0;
+    int64_t split_candidate_count = 0;
+    int64_t split_candidate_selected_count = 0;
+    int64_t split_candidate_roi_rejected_count = 0;
+    int64_t split_candidate_budget_rejected_count = 0;
+    int64_t split_records_read = 0;
+    int64_t split_records_written = 0;
+    int64_t reassign_records_read = 0;
+    int64_t reassign_records_written = 0;
+    int64_t refinement_partition_count = 0;
+    int64_t refinement_records_per_iteration = 0;
+    int64_t refinement_records_read = 0;
+    int64_t refinement_records_written = 0;
+    int64_t refinement_iterations = 0;
+    int64_t refinement_source_split_count = 0;
+    bool refinement_skipped = false;
+    int64_t observed_split_ns_per_record = 0;
+    int64_t observed_refine_ns_per_split = 0;
+    int64_t observed_refine_ns_per_parent_record = 0;
+    float observed_refine_read_records_per_parent = 0.0f;
+    float observed_refine_write_records_per_parent = 0.0f;
+    int64_t observed_reassign_ns_per_record = 0;
+    int64_t estimated_query_window_ns = 0;
+    int64_t maintenance_time_budget_ns = 0;
+    int64_t split_budget_by_time = 0;
+    int64_t reassign_budget_by_time = 0;
+    float aps_average_fanout = 0.0f;
+    float aps_average_scanned_records = 0.0f;
+    float aps_average_scanned_list_size = 0.0f;
+    float aps_fanout_growth = 0.0f;
+    float aps_scanned_list_size_pressure = 0.0f;
+    float payback_windows = 1.0f;
+    int64_t partition_count_before = 0;
+    int64_t partition_count_after = 0;
+    bool streaming_rent_buy_enabled = false;
+    int64_t streaming_candidate_count = 0;
+    int64_t streaming_selected_count = 0;
+    int64_t streaming_window_rent_ns = 0;
+    int64_t streaming_structural_rent_ns = 0;
+    int64_t streaming_structural_credit_ns = 0;
+    int64_t streaming_selected_buy_ns = 0;
+    int64_t streaming_budget_credit_ns = 0;
+    float streaming_scan_growth_pressure = 0.0f;
+    bool resource_rent_buy_enabled = false;
+    int64_t resource_price_window_id = -1;
+    int64_t resource_price_window_duration_ns = 0;
+    float resource_child_probe_factor = 0.0f;
+    int64_t resource_candidate_count = 0;
+    int64_t resource_selected_count = 0;
+    int64_t resource_window_rent_ns = 0;
+    int64_t resource_selected_buy_ns = 0;
+    int64_t resource_split_candidate_count = 0;
+    int64_t resource_best_cohort_size = 0;
+    int64_t resource_best_cohort_credit_ns = 0;
+    int64_t resource_best_cohort_buy_ns = 0;
+    float resource_best_cohort_ratio = 0.0f;
+    int64_t resource_selected_cohort_size = 0;
+    int64_t resource_selected_cohort_buy_ns = 0;
+    bool search_first_enabled = false;
+    float search_first_gain_target = 0.0f;
+    int64_t search_first_max_cohort = 0;
+    int64_t search_first_available_gain_ns = 0;
+    int64_t search_first_selected_gain_ns = 0;
+    float search_first_selected_gain_fraction = 0.0f;
+    int64_t search_first_cxl_split_candidate_count = 0;
+    int64_t search_first_cxl_only_split_candidate_count = 0;
+    int64_t search_first_selected_cxl_only_split_count = 0;
+    bool resource_forced_action_set = false;
+    vector<CxlPolicyDecision> resource_policy_decisions;
+    vector<CxlSplitLineage> split_lineage;
 };
 
 struct SearchResult {

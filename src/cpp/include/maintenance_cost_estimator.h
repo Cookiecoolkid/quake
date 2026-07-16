@@ -148,7 +148,11 @@ public:
     * @param k Parameter used in latency estimation.
     * @throws std::invalid_argument if k is non-positive or alpha is non-positive.
     */
-    MaintenanceCostEstimator(int d, float alpha, int k);
+    MaintenanceCostEstimator(
+        int d,
+        float alpha,
+        int k,
+        const std::string &profile_filename = "");
 
    /**
     * @brief Computes the delta cost for splitting a partition.

@@ -99,11 +99,16 @@ public:
      */
     void initialize_maintenance_policy(shared_ptr<MaintenancePolicyParams> maintenance_policy_params);
 
+    void set_cxl_resource_price_snapshot(
+        shared_ptr<CxlResourcePriceSnapshot> snapshot);
+
     /**
      * @brief Perform maintenance operations.
      * @return Timing information for the maintenance.
      */
     shared_ptr<MaintenanceTimingInfo> maintenance();
+
+    void record_cxl_update_counts(int64_t add_count, int64_t delete_count);
 
     /**
      * @brief Validate the state of the index.
@@ -135,6 +140,10 @@ public:
      * @return The number of partitions.
      */
     int64_t nlist();
+
+    /** Return active partition IDs and their aligned physical sizes. */
+    Tensor partition_ids();
+    Tensor partition_sizes();
 
     /**
      * @brief Get the dimensionality of the vectors in the index.

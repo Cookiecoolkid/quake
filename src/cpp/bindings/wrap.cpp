@@ -110,6 +110,10 @@ PYBIND11_MODULE(_bindings, m) {
         .def("maintenance", &QuakeIndex::maintenance,
              "Perform maintenance operations on the index (e.g., splits and merges).\n"
              "Returns timing information for the maintenance operation.")
+        .def("record_cxl_update_counts", &QuakeIndex::record_cxl_update_counts,
+             "Record recent add/delete counts for streaming CXL-aware maintenance.")
+        .def("set_cxl_resource_price_snapshot", &QuakeIndex::set_cxl_resource_price_snapshot,
+             "Install the causal CXL resource prices used by resource rent-or-buy maintenance.")
         .def("initialize_maintenance_policy", &QuakeIndex::initialize_maintenance_policy,
              "Initialize the maintenance policy for the index.\n\n"
              "Args:\n"
@@ -127,6 +131,10 @@ PYBIND11_MODULE(_bindings, m) {
              "Return the total number of vectors stored in the index.")
         .def("nlist", &QuakeIndex::nlist,
              "Return the number of partitions (lists) in the index.")
+        .def("partition_ids", &QuakeIndex::partition_ids,
+             "Return active partition IDs in partition-store order.")
+        .def("partition_sizes", &QuakeIndex::partition_sizes,
+             "Return physical partition sizes aligned with partition_ids().")
         .def_readonly("parent", &QuakeIndex::parent_,
             "Return the parent index over the centroids.")
         .def_readonly("current_level", &QuakeIndex::current_level_,
@@ -206,6 +214,8 @@ PYBIND11_MODULE(_bindings, m) {
              "Factor to adjust the number of neighbors to return.")
         .def_readwrite("track_hits", &SearchParams::track_hits,
              "Flag to track hits for maintenance policy.")
+        .def_readwrite("deterministic_serial_scan", &SearchParams::deterministic_serial_scan,
+             "Use Quake's serial scan path for deterministic APS trace collection.")
         .def_readwrite("use_auncel", &SearchParams::use_auncel,
                 "Flag to use Auncel recall estimation for search.")
         .def_readwrite("auncel_a", &SearchParams::auncel_a,
@@ -230,6 +240,8 @@ PYBIND11_MODULE(_bindings, m) {
             oss << "\"nprobe\": " << s.nprobe << ", ";
             oss << "\"recall_target\": " << s.recall_target << ", ";
             oss << "\"batched_scan\": " << (s.batched_scan ? "true" : "false") << ", ";
+            oss << "\"deterministic_serial_scan\": "
+                << (s.deterministic_serial_scan ? "true" : "false") << ", ";
             oss << "\"use_precomputed\": " << (s.use_precomputed ? "true" : "false") << ", ";
             oss << "\"initial_search_fraction\": " << s.initial_search_fraction << ", ";
             oss << "\"recompute_threshold\": " << s.recompute_threshold << ", ";
@@ -237,6 +249,67 @@ PYBIND11_MODULE(_bindings, m) {
             oss << "}";
             return oss.str();
         });
+
+    class_<CxlResourcePrice>(m, "CxlResourcePrice")
+        .def(init<>())
+        .def_readwrite("resource_id", &CxlResourcePrice::resource_id)
+        .def_readwrite("byte_price_ns", &CxlResourcePrice::byte_price_ns)
+        .def_readwrite("op_price_ns", &CxlResourcePrice::op_price_ns)
+        .def_readwrite("utilization", &CxlResourcePrice::utilization)
+        .def_readwrite("demand_bytes", &CxlResourcePrice::demand_bytes);
+
+    class_<CxlResourcePriceSnapshot, shared_ptr<CxlResourcePriceSnapshot>>(
+        m, "CxlResourcePriceSnapshot")
+        .def(init<>())
+        .def_readwrite("window_id", &CxlResourcePriceSnapshot::window_id)
+        .def_readwrite("window_duration_ns", &CxlResourcePriceSnapshot::window_duration_ns)
+        .def_readwrite("resources", &CxlResourcePriceSnapshot::resources)
+        .def_readwrite("home_read_byte_price_ns", &CxlResourcePriceSnapshot::home_read_byte_price_ns)
+        .def_readwrite("home_read_op_price_ns", &CxlResourcePriceSnapshot::home_read_op_price_ns)
+        .def_readwrite("list_home_ids", &CxlResourcePriceSnapshot::list_home_ids)
+        .def_readwrite("maintenance_read_byte_price_ns", &CxlResourcePriceSnapshot::maintenance_read_byte_price_ns)
+        .def_readwrite("maintenance_write_byte_price_ns", &CxlResourcePriceSnapshot::maintenance_write_byte_price_ns)
+        .def_readwrite("routing_metadata_shadow_price_ns_per_byte", &CxlResourcePriceSnapshot::routing_metadata_shadow_price_ns_per_byte)
+        .def_readwrite("dram_shadow_price_ns_per_byte", &CxlResourcePriceSnapshot::dram_shadow_price_ns_per_byte)
+        .def_readwrite("valid", &CxlResourcePriceSnapshot::valid);
+
+    class_<CxlPolicyDecision>(m, "CxlPolicyDecision")
+        .def(init<>())
+        .def_readonly("action_kind", &CxlPolicyDecision::action_kind)
+        .def_readonly("partition_id", &CxlPolicyDecision::partition_id)
+        .def_readonly("home_id", &CxlPolicyDecision::home_id)
+        .def_readonly("records", &CxlPolicyDecision::records)
+        .def_readonly("cost_before_ns", &CxlPolicyDecision::cost_before_ns)
+        .def_readonly("cost_after_ns", &CxlPolicyDecision::cost_after_ns)
+        .def_readonly("rent_ns", &CxlPolicyDecision::rent_ns)
+        .def_readonly("buy_ns", &CxlPolicyDecision::buy_ns)
+        .def_readonly("credit_ns", &CxlPolicyDecision::credit_ns)
+        .def_readonly("rent_buy_ratio", &CxlPolicyDecision::rent_buy_ratio)
+        .def_readonly("native_rent_ns", &CxlPolicyDecision::native_rent_ns)
+        .def_readonly("resource_rent_ns", &CxlPolicyDecision::resource_rent_ns)
+        .def_readonly("native_legal", &CxlPolicyDecision::native_legal)
+        .def_readonly("cxl_search_profitable", &CxlPolicyDecision::cxl_search_profitable)
+        .def_readonly("read_line_bytes", &CxlPolicyDecision::read_line_bytes)
+        .def_readonly("write_line_bytes", &CxlPolicyDecision::write_line_bytes)
+        .def_readonly("cohort_id", &CxlPolicyDecision::cohort_id)
+        .def_readonly("cohort_size", &CxlPolicyDecision::cohort_size)
+        .def_readonly("cohort_credit_ns", &CxlPolicyDecision::cohort_credit_ns)
+        .def_readonly("cohort_variable_buy_ns", &CxlPolicyDecision::cohort_variable_buy_ns)
+        .def_readonly("cohort_shared_buy_ns", &CxlPolicyDecision::cohort_shared_buy_ns)
+        .def_readonly("cohort_buy_ns", &CxlPolicyDecision::cohort_buy_ns)
+        .def_readonly("cohort_rent_buy_ratio", &CxlPolicyDecision::cohort_rent_buy_ratio)
+        .def_readonly("cohort_search_gain_ns", &CxlPolicyDecision::cohort_search_gain_ns)
+        .def_readonly("cohort_search_gain_fraction", &CxlPolicyDecision::cohort_search_gain_fraction)
+        .def_readonly("selected", &CxlPolicyDecision::selected)
+        .def_readonly("rejection_reason", &CxlPolicyDecision::rejection_reason);
+
+    class_<CxlSplitLineage>(m, "CxlSplitLineage")
+        .def_readonly("parent_id", &CxlSplitLineage::parent_id)
+        .def_readonly("child_ids", &CxlSplitLineage::child_ids)
+        .def_readonly("final_child_sizes", &CxlSplitLineage::final_child_sizes)
+        .def_readonly("source_order_gather_run_counts", &CxlSplitLineage::source_order_gather_run_counts)
+        .def_readonly("child_logical_line_footprint", &CxlSplitLineage::child_logical_line_footprint)
+        .def_readonly("membership_bitmap_bytes", &CxlSplitLineage::membership_bitmap_bytes);
 
     /*********** MaintenancePolicyParams Binding ***********/
     class_<MaintenancePolicyParams, shared_ptr<MaintenancePolicyParams>>(m, "MaintenancePolicyParams")
@@ -267,6 +340,116 @@ PYBIND11_MODULE(_bindings, m) {
              (std::string("Delete threshold (ns). default = ") + std::to_string(DEFAULT_DELETE_THRESHOLD_NS)).c_str())
         .def_readwrite("split_threshold_ns", &MaintenancePolicyParams::split_threshold_ns,
              (std::string("Split threshold (ns). default = ") + std::to_string(DEFAULT_SPLIT_THRESHOLD_NS)).c_str())
+        .def_readwrite("latency_profile_path", &MaintenancePolicyParams::latency_profile_path,
+             "Optional shared CSV profile for the native Quake list-scan cost estimator.")
+        .def_readwrite("enable_cxl_cost_model", &MaintenancePolicyParams::enable_cxl_cost_model,
+             "Enable the lightweight CXL-aware maintenance score extension.")
+        .def_readwrite("cxl_num_mcs", &MaintenancePolicyParams::cxl_num_mcs,
+             "Number of CXL memory controllers used by the lightweight CXL cost model.")
+        .def_readwrite("cxl_line_bytes", &MaintenancePolicyParams::cxl_line_bytes,
+             "CXL cache-line transfer size used by the lightweight CXL cost model.")
+        .def_readwrite("cxl_entry_bytes", &MaintenancePolicyParams::cxl_entry_bytes,
+             "Posting entry bytes used by the lightweight CXL cost model.")
+        .def_readwrite("cxl_metadata_bytes", &MaintenancePolicyParams::cxl_metadata_bytes,
+             "Metadata bytes per record reserved for future CXL layout-aware policies.")
+        .def_readwrite("cxl_scan_mode", &MaintenancePolicyParams::cxl_scan_mode,
+             "CXL scan mode used by the lightweight CXL cost model: host_scan or fpga_scan.")
+        .def_readwrite("cxl_mc_bw_bytes_per_ns", &MaintenancePolicyParams::cxl_mc_bw_bytes_per_ns,
+             "Per-MC bandwidth in bytes/ns used by the lightweight CXL cost model.")
+        .def_readwrite("cxl_link_bw_bytes_per_ns", &MaintenancePolicyParams::cxl_link_bw_bytes_per_ns,
+             "CXL link bandwidth in bytes/ns used by the lightweight CXL cost model.")
+        .def_readwrite("cxl_maintenance_bandwidth_fraction", &MaintenancePolicyParams::cxl_maintenance_bandwidth_fraction,
+             "Fraction of bottleneck bandwidth budgeted for background maintenance.")
+        .def_readwrite("cxl_split_score_weight", &MaintenancePolicyParams::cxl_split_score_weight,
+             "Weight for CXL scan benefit in split scoring.")
+        .def_readwrite("cxl_maintenance_penalty_weight", &MaintenancePolicyParams::cxl_maintenance_penalty_weight,
+             "Weight for CXL maintenance traffic penalty.")
+        .def_readwrite("cxl_fanout_penalty_ns", &MaintenancePolicyParams::cxl_fanout_penalty_ns,
+             "Per-hit fanout/control penalty used by the lightweight CXL cost model.")
+        .def_readwrite("cxl_fanout_penalty_weight", &MaintenancePolicyParams::cxl_fanout_penalty_weight,
+             "Weight for CXL fanout/control penalty in split scoring.")
+        .def_readwrite("cxl_workload_adaptive", &MaintenancePolicyParams::cxl_workload_adaptive,
+             "Enable streaming workload-adaptive CXL cost weights.")
+        .def_readwrite("cxl_adaptive_ewma_alpha", &MaintenancePolicyParams::cxl_adaptive_ewma_alpha,
+             "EWMA alpha for streaming CXL workload pressure signals.")
+        .def_readwrite("cxl_adaptive_growth_split_gain", &MaintenancePolicyParams::cxl_adaptive_growth_split_gain,
+             "Split-score gain applied when recent vector growth is high.")
+        .def_readwrite("cxl_adaptive_churn_split_gain", &MaintenancePolicyParams::cxl_adaptive_churn_split_gain,
+             "Split-score gain applied when recent insert/delete churn is high.")
+        .def_readwrite("cxl_adaptive_scan_split_gain", &MaintenancePolicyParams::cxl_adaptive_scan_split_gain,
+             "Split-score gain applied when recent scan fraction is high.")
+        .def_readwrite("cxl_adaptive_maintenance_penalty_gain", &MaintenancePolicyParams::cxl_adaptive_maintenance_penalty_gain,
+             "Penalty gain applied when previous CXL maintenance traffic was high.")
+        .def_readwrite("cxl_adaptive_delete_relief_gain", &MaintenancePolicyParams::cxl_adaptive_delete_relief_gain,
+             "Delete maintenance penalty relief applied under delete-heavy windows.")
+        .def_readwrite("cxl_adaptive_fanout_growth_gain", &MaintenancePolicyParams::cxl_adaptive_fanout_growth_gain,
+             "Fanout penalty gain applied under growth-heavy windows.")
+        .def_readwrite("cxl_workload_adaptive_v2", &MaintenancePolicyParams::cxl_workload_adaptive_v2,
+             "Enable ROI- and budget-gated streaming CXL workload-adaptive policy.")
+        .def_readwrite("cxl_adaptive_roi_threshold", &MaintenancePolicyParams::cxl_adaptive_roi_threshold,
+             "Minimum split benefit/cost ratio for the ROI-gated adaptive policy.")
+        .def_readwrite("cxl_adaptive_min_gain_ns", &MaintenancePolicyParams::cxl_adaptive_min_gain_ns,
+             "Minimum amortized split gain in ns for the ROI-gated adaptive policy.")
+        .def_readwrite("cxl_adaptive_action_overhead_ns", &MaintenancePolicyParams::cxl_adaptive_action_overhead_ns,
+             "Fixed split action cost in ns before window amortization.")
+        .def_readwrite("cxl_adaptive_base_split_budget_fraction", &MaintenancePolicyParams::cxl_adaptive_base_split_budget_fraction,
+             "Base fraction of partitions that the ROI-gated adaptive policy may split per maintenance window.")
+        .def_readwrite("cxl_adaptive_max_split_budget_fraction", &MaintenancePolicyParams::cxl_adaptive_max_split_budget_fraction,
+             "Maximum fraction of partitions that the ROI-gated adaptive policy may split per maintenance window.")
+        .def_readwrite("cxl_adaptive_min_split_budget", &MaintenancePolicyParams::cxl_adaptive_min_split_budget,
+             "Minimum non-zero split budget for active ROI-gated adaptive windows.")
+        .def_readwrite("cxl_adaptive_max_split_budget", &MaintenancePolicyParams::cxl_adaptive_max_split_budget,
+             "Maximum split budget for one ROI-gated adaptive maintenance window.")
+        .def_readwrite("cxl_adaptive_target_partition_size", &MaintenancePolicyParams::cxl_adaptive_target_partition_size,
+             "Target live records per partition; zero derives it from the initial index.")
+        .def_readwrite("cxl_adaptive_growth_debt_repay_fraction", &MaintenancePolicyParams::cxl_adaptive_growth_debt_repay_fraction,
+             "Fraction of missing structural partitions repaid per maintenance window.")
+        .def_readwrite("cxl_adaptive_structural_size_ratio", &MaintenancePolicyParams::cxl_adaptive_structural_size_ratio,
+             "Minimum size relative to the initial target for a structural split candidate.")
+        .def_readwrite("cxl_adaptive_partition_count_slack", &MaintenancePolicyParams::cxl_adaptive_partition_count_slack,
+             "Allowed partition-count slack before cold-list reassignment is selected.")
+        .def_readwrite("cxl_adaptive_max_reassign_budget", &MaintenancePolicyParams::cxl_adaptive_max_reassign_budget,
+             "Maximum cold-list reassignments in one maintenance window.")
+        .def_readwrite("cxl_adaptive_observed_cost_enabled", &MaintenancePolicyParams::cxl_adaptive_observed_cost_enabled,
+             "Use observed split/refine/reassign time in subsequent maintenance decisions.")
+        .def_readwrite("cxl_adaptive_observed_cost_alpha", &MaintenancePolicyParams::cxl_adaptive_observed_cost_alpha,
+             "EWMA alpha for observed maintenance action costs.")
+        .def_readwrite("cxl_adaptive_maintenance_time_budget_fraction", &MaintenancePolicyParams::cxl_adaptive_maintenance_time_budget_fraction,
+             "Maintenance-time budget relative to the estimated query-window scan time.")
+        .def_readwrite("cxl_adaptive_warmup_split_budget", &MaintenancePolicyParams::cxl_adaptive_warmup_split_budget,
+             "Split budget before the first observed maintenance cost sample.")
+        .def_readwrite("cxl_adaptive_refinement_mode", &MaintenancePolicyParams::cxl_adaptive_refinement_mode,
+             "Refinement mode for v2: full, bounded, or lazy.")
+        .def_readwrite("cxl_adaptive_max_refine_splits", &MaintenancePolicyParams::cxl_adaptive_max_refine_splits,
+             "Maximum parent splits whose children receive local refinement in bounded mode.")
+        .def_readwrite("cxl_adaptive_max_payback_windows", &MaintenancePolicyParams::cxl_adaptive_max_payback_windows,
+             "Maximum online payback horizon inferred from the observed update rate.")
+        .def_readwrite("cxl_adaptive_aps_feedback_enabled", &MaintenancePolicyParams::cxl_adaptive_aps_feedback_enabled,
+             "Use APS fanout and average scanned-list size as online split signals.")
+        .def_readwrite("cxl_adaptive_reassign_time_budget_enabled", &MaintenancePolicyParams::cxl_adaptive_reassign_time_budget_enabled,
+             "Apply the observed maintenance-time budget to merge-like reassignments.")
+        .def_readwrite("cxl_adaptive_warmup_reassign_budget", &MaintenancePolicyParams::cxl_adaptive_warmup_reassign_budget,
+             "Reassign action cap before an observed reassign cost is available.")
+        .def_readwrite("cxl_streaming_rent_buy", &MaintenancePolicyParams::cxl_streaming_rent_buy,
+             "Enable online rent-or-buy maintenance using only past query windows and observed action costs.")
+        .def_readwrite("cxl_streaming_staged", &MaintenancePolicyParams::cxl_streaming_staged,
+             "Enable coherent descriptor/view staged maintenance with causal resource pricing.")
+        .def_readwrite("cxl_resource_rent_buy", &MaintenancePolicyParams::cxl_resource_rent_buy,
+             "Enable causal resource-priced rent-or-buy maintenance.")
+        .def_readwrite("cxl_search_first", &MaintenancePolicyParams::cxl_search_first,
+             "Select CXL-profitable splits covering the target current search gain; native Quake cost is telemetry only.")
+        .def_readwrite("cxl_search_first_gain_target", &MaintenancePolicyParams::cxl_search_first_gain_target,
+             "Fraction of available current search gain targeted by search-first maintenance.")
+        .def_readwrite("cxl_search_first_max_cohort", &MaintenancePolicyParams::cxl_search_first_max_cohort,
+             "Maximum split cohort selected by search-first maintenance.")
+        .def_readwrite("cxl_resource_force_action_set", &MaintenancePolicyParams::cxl_resource_force_action_set,
+             "Audit-only: execute exactly the requested optional resource-policy candidates.")
+        .def_readwrite("cxl_resource_force_window_id", &MaintenancePolicyParams::cxl_resource_force_window_id,
+             "Audit-only resource-price window for the forced action set; negative means every window.")
+        .def_readwrite("cxl_resource_forced_split_ids", &MaintenancePolicyParams::cxl_resource_forced_split_ids,
+             "Split candidate IDs requested by the audit override.")
+        .def_readwrite("cxl_resource_forced_reassign_ids", &MaintenancePolicyParams::cxl_resource_forced_reassign_ids,
+             "Reassign candidate IDs requested by the audit override.")
         .def("__repr__", [](const MaintenancePolicyParams &m) {
             std::ostringstream oss;
             oss << "{";
@@ -280,6 +463,57 @@ PYBIND11_MODULE(_bindings, m) {
             oss << "\"enable_delete_rejection\": " << (m.enable_delete_rejection ? "true" : "false") << ", ";
             oss << "\"delete_threshold_ns\": " << m.delete_threshold_ns << ", ";
             oss << "\"split_threshold_ns\": " << m.split_threshold_ns << ", ";
+            oss << "\"enable_cxl_cost_model\": " << (m.enable_cxl_cost_model ? "true" : "false") << ", ";
+            oss << "\"cxl_num_mcs\": " << m.cxl_num_mcs << ", ";
+            oss << "\"cxl_line_bytes\": " << m.cxl_line_bytes << ", ";
+            oss << "\"cxl_entry_bytes\": " << m.cxl_entry_bytes << ", ";
+            oss << "\"cxl_metadata_bytes\": " << m.cxl_metadata_bytes << ", ";
+            oss << "\"cxl_scan_mode\": \"" << m.cxl_scan_mode << "\", ";
+            oss << "\"cxl_mc_bw_bytes_per_ns\": " << m.cxl_mc_bw_bytes_per_ns << ", ";
+            oss << "\"cxl_link_bw_bytes_per_ns\": " << m.cxl_link_bw_bytes_per_ns << ", ";
+            oss << "\"cxl_maintenance_bandwidth_fraction\": " << m.cxl_maintenance_bandwidth_fraction << ", ";
+            oss << "\"cxl_split_score_weight\": " << m.cxl_split_score_weight << ", ";
+            oss << "\"cxl_maintenance_penalty_weight\": " << m.cxl_maintenance_penalty_weight << ", ";
+            oss << "\"cxl_fanout_penalty_ns\": " << m.cxl_fanout_penalty_ns << ", ";
+            oss << "\"cxl_fanout_penalty_weight\": " << m.cxl_fanout_penalty_weight << ", ";
+            oss << "\"cxl_workload_adaptive\": " << (m.cxl_workload_adaptive ? "true" : "false") << ", ";
+            oss << "\"cxl_adaptive_ewma_alpha\": " << m.cxl_adaptive_ewma_alpha << ", ";
+            oss << "\"cxl_adaptive_growth_split_gain\": " << m.cxl_adaptive_growth_split_gain << ", ";
+            oss << "\"cxl_adaptive_churn_split_gain\": " << m.cxl_adaptive_churn_split_gain << ", ";
+            oss << "\"cxl_adaptive_scan_split_gain\": " << m.cxl_adaptive_scan_split_gain << ", ";
+            oss << "\"cxl_adaptive_maintenance_penalty_gain\": " << m.cxl_adaptive_maintenance_penalty_gain << ", ";
+            oss << "\"cxl_adaptive_delete_relief_gain\": " << m.cxl_adaptive_delete_relief_gain << ", ";
+            oss << "\"cxl_adaptive_fanout_growth_gain\": " << m.cxl_adaptive_fanout_growth_gain << ", ";
+            oss << "\"cxl_workload_adaptive_v2\": " << (m.cxl_workload_adaptive_v2 ? "true" : "false") << ", ";
+            oss << "\"cxl_adaptive_roi_threshold\": " << m.cxl_adaptive_roi_threshold << ", ";
+            oss << "\"cxl_adaptive_min_gain_ns\": " << m.cxl_adaptive_min_gain_ns << ", ";
+            oss << "\"cxl_adaptive_action_overhead_ns\": " << m.cxl_adaptive_action_overhead_ns << ", ";
+            oss << "\"cxl_adaptive_base_split_budget_fraction\": " << m.cxl_adaptive_base_split_budget_fraction << ", ";
+            oss << "\"cxl_adaptive_max_split_budget_fraction\": " << m.cxl_adaptive_max_split_budget_fraction << ", ";
+            oss << "\"cxl_adaptive_min_split_budget\": " << m.cxl_adaptive_min_split_budget << ", ";
+            oss << "\"cxl_adaptive_max_split_budget\": " << m.cxl_adaptive_max_split_budget << ", ";
+            oss << "\"cxl_adaptive_target_partition_size\": " << m.cxl_adaptive_target_partition_size << ", ";
+            oss << "\"cxl_adaptive_growth_debt_repay_fraction\": " << m.cxl_adaptive_growth_debt_repay_fraction << ", ";
+            oss << "\"cxl_adaptive_structural_size_ratio\": " << m.cxl_adaptive_structural_size_ratio << ", ";
+            oss << "\"cxl_adaptive_partition_count_slack\": " << m.cxl_adaptive_partition_count_slack << ", ";
+            oss << "\"cxl_adaptive_max_reassign_budget\": " << m.cxl_adaptive_max_reassign_budget << ", ";
+            oss << "\"cxl_adaptive_observed_cost_enabled\": " << (m.cxl_adaptive_observed_cost_enabled ? "true" : "false") << ", ";
+            oss << "\"cxl_adaptive_observed_cost_alpha\": " << m.cxl_adaptive_observed_cost_alpha << ", ";
+            oss << "\"cxl_adaptive_maintenance_time_budget_fraction\": " << m.cxl_adaptive_maintenance_time_budget_fraction << ", ";
+            oss << "\"cxl_adaptive_warmup_split_budget\": " << m.cxl_adaptive_warmup_split_budget << ", ";
+            oss << "\"cxl_adaptive_refinement_mode\": \"" << m.cxl_adaptive_refinement_mode << "\", ";
+            oss << "\"cxl_adaptive_max_refine_splits\": " << m.cxl_adaptive_max_refine_splits << ", ";
+            oss << "\"cxl_adaptive_max_payback_windows\": " << m.cxl_adaptive_max_payback_windows << ", ";
+            oss << "\"cxl_adaptive_aps_feedback_enabled\": " << (m.cxl_adaptive_aps_feedback_enabled ? "true" : "false") << ", ";
+            oss << "\"cxl_adaptive_reassign_time_budget_enabled\": " << (m.cxl_adaptive_reassign_time_budget_enabled ? "true" : "false") << ", ";
+            oss << "\"cxl_adaptive_warmup_reassign_budget\": " << m.cxl_adaptive_warmup_reassign_budget << ", ";
+            oss << "\"cxl_streaming_rent_buy\": " << (m.cxl_streaming_rent_buy ? "true" : "false") << ", ";
+            oss << "\"cxl_resource_rent_buy\": " << (m.cxl_resource_rent_buy ? "true" : "false") << ", ";
+            oss << "\"cxl_search_first\": " << (m.cxl_search_first ? "true" : "false") << ", ";
+            oss << "\"cxl_search_first_gain_target\": " << m.cxl_search_first_gain_target << ", ";
+            oss << "\"cxl_search_first_max_cohort\": " << m.cxl_search_first_max_cohort << ", ";
+            oss << "\"cxl_resource_force_action_set\": " << (m.cxl_resource_force_action_set ? "true" : "false") << ", ";
+            oss << "\"cxl_resource_force_window_id\": " << m.cxl_resource_force_window_id;
             oss << "}";
             return oss.str();
         });
@@ -294,10 +528,87 @@ PYBIND11_MODULE(_bindings, m) {
              "Time taken for delete operations in microseconds.")
          .def_readonly("refinement_time_us", &MaintenanceTimingInfo::refinement_time_us,
              "Time taken for refinement of split operations in microseconds.")
+         .def_readonly("decision_time_us", &MaintenanceTimingInfo::decision_time_us,
+             "Time spent selecting maintenance actions in microseconds.")
+         .def_readonly("action_time_us", &MaintenanceTimingInfo::action_time_us,
+             "Time spent executing committed maintenance actions in microseconds.")
          .def_readonly("n_splits", &MaintenanceTimingInfo::n_splits,
              "Number of partition split operations performed.")
          .def_readonly("n_deletes", &MaintenanceTimingInfo::n_deletes,
              "Number of partition delete operations performed.")
+         .def_readonly("decision_partition_count", &MaintenanceTimingInfo::decision_partition_count)
+         .def_readonly("centroid_update_count", &MaintenanceTimingInfo::centroid_update_count)
+         .def_readonly("delete_candidate_count", &MaintenanceTimingInfo::delete_candidate_count)
+         .def_readonly("delete_candidate_records", &MaintenanceTimingInfo::delete_candidate_records)
+         .def_readonly("split_candidate_count", &MaintenanceTimingInfo::split_candidate_count)
+         .def_readonly("split_candidate_selected_count", &MaintenanceTimingInfo::split_candidate_selected_count)
+         .def_readonly("split_candidate_roi_rejected_count", &MaintenanceTimingInfo::split_candidate_roi_rejected_count)
+         .def_readonly("split_candidate_budget_rejected_count", &MaintenanceTimingInfo::split_candidate_budget_rejected_count)
+         .def_readonly("split_records_read", &MaintenanceTimingInfo::split_records_read)
+         .def_readonly("split_records_written", &MaintenanceTimingInfo::split_records_written)
+         .def_readonly("reassign_records_read", &MaintenanceTimingInfo::reassign_records_read)
+         .def_readonly("reassign_records_written", &MaintenanceTimingInfo::reassign_records_written)
+         .def_readonly("refinement_partition_count", &MaintenanceTimingInfo::refinement_partition_count)
+         .def_readonly("refinement_records_per_iteration", &MaintenanceTimingInfo::refinement_records_per_iteration)
+         .def_readonly("refinement_records_read", &MaintenanceTimingInfo::refinement_records_read)
+         .def_readonly("refinement_records_written", &MaintenanceTimingInfo::refinement_records_written)
+         .def_readonly("refinement_iterations", &MaintenanceTimingInfo::refinement_iterations)
+         .def_readonly("refinement_source_split_count", &MaintenanceTimingInfo::refinement_source_split_count)
+         .def_readonly("refinement_skipped", &MaintenanceTimingInfo::refinement_skipped)
+         .def_readonly("observed_split_ns_per_record", &MaintenanceTimingInfo::observed_split_ns_per_record)
+         .def_readonly("observed_refine_ns_per_split", &MaintenanceTimingInfo::observed_refine_ns_per_split)
+         .def_readonly("observed_refine_ns_per_parent_record", &MaintenanceTimingInfo::observed_refine_ns_per_parent_record)
+         .def_readonly("observed_refine_read_records_per_parent", &MaintenanceTimingInfo::observed_refine_read_records_per_parent)
+         .def_readonly("observed_refine_write_records_per_parent", &MaintenanceTimingInfo::observed_refine_write_records_per_parent)
+         .def_readonly("observed_reassign_ns_per_record", &MaintenanceTimingInfo::observed_reassign_ns_per_record)
+         .def_readonly("estimated_query_window_ns", &MaintenanceTimingInfo::estimated_query_window_ns)
+         .def_readonly("maintenance_time_budget_ns", &MaintenanceTimingInfo::maintenance_time_budget_ns)
+         .def_readonly("split_budget_by_time", &MaintenanceTimingInfo::split_budget_by_time)
+         .def_readonly("reassign_budget_by_time", &MaintenanceTimingInfo::reassign_budget_by_time)
+         .def_readonly("aps_average_fanout", &MaintenanceTimingInfo::aps_average_fanout)
+         .def_readonly("aps_average_scanned_records", &MaintenanceTimingInfo::aps_average_scanned_records)
+         .def_readonly("aps_average_scanned_list_size", &MaintenanceTimingInfo::aps_average_scanned_list_size)
+         .def_readonly("aps_fanout_growth", &MaintenanceTimingInfo::aps_fanout_growth)
+         .def_readonly("aps_scanned_list_size_pressure", &MaintenanceTimingInfo::aps_scanned_list_size_pressure)
+         .def_readonly("payback_windows", &MaintenanceTimingInfo::payback_windows)
+         .def_readonly("partition_count_before", &MaintenanceTimingInfo::partition_count_before)
+         .def_readonly("partition_count_after", &MaintenanceTimingInfo::partition_count_after)
+         .def_readonly("streaming_rent_buy_enabled", &MaintenanceTimingInfo::streaming_rent_buy_enabled)
+         .def_readonly("streaming_candidate_count", &MaintenanceTimingInfo::streaming_candidate_count)
+         .def_readonly("streaming_selected_count", &MaintenanceTimingInfo::streaming_selected_count)
+         .def_readonly("streaming_window_rent_ns", &MaintenanceTimingInfo::streaming_window_rent_ns)
+         .def_readonly("streaming_structural_rent_ns", &MaintenanceTimingInfo::streaming_structural_rent_ns)
+         .def_readonly("streaming_structural_credit_ns", &MaintenanceTimingInfo::streaming_structural_credit_ns)
+         .def_readonly("streaming_selected_buy_ns", &MaintenanceTimingInfo::streaming_selected_buy_ns)
+         .def_readonly("streaming_budget_credit_ns", &MaintenanceTimingInfo::streaming_budget_credit_ns)
+         .def_readonly("streaming_scan_growth_pressure", &MaintenanceTimingInfo::streaming_scan_growth_pressure)
+         .def_readonly("resource_rent_buy_enabled", &MaintenanceTimingInfo::resource_rent_buy_enabled)
+         .def_readonly("resource_price_window_id", &MaintenanceTimingInfo::resource_price_window_id)
+         .def_readonly("resource_price_window_duration_ns", &MaintenanceTimingInfo::resource_price_window_duration_ns)
+         .def_readonly("resource_child_probe_factor", &MaintenanceTimingInfo::resource_child_probe_factor)
+         .def_readonly("resource_candidate_count", &MaintenanceTimingInfo::resource_candidate_count)
+         .def_readonly("resource_selected_count", &MaintenanceTimingInfo::resource_selected_count)
+         .def_readonly("resource_window_rent_ns", &MaintenanceTimingInfo::resource_window_rent_ns)
+         .def_readonly("resource_selected_buy_ns", &MaintenanceTimingInfo::resource_selected_buy_ns)
+         .def_readonly("resource_split_candidate_count", &MaintenanceTimingInfo::resource_split_candidate_count)
+         .def_readonly("resource_best_cohort_size", &MaintenanceTimingInfo::resource_best_cohort_size)
+         .def_readonly("resource_best_cohort_credit_ns", &MaintenanceTimingInfo::resource_best_cohort_credit_ns)
+         .def_readonly("resource_best_cohort_buy_ns", &MaintenanceTimingInfo::resource_best_cohort_buy_ns)
+         .def_readonly("resource_best_cohort_ratio", &MaintenanceTimingInfo::resource_best_cohort_ratio)
+         .def_readonly("resource_selected_cohort_size", &MaintenanceTimingInfo::resource_selected_cohort_size)
+         .def_readonly("resource_selected_cohort_buy_ns", &MaintenanceTimingInfo::resource_selected_cohort_buy_ns)
+         .def_readonly("search_first_enabled", &MaintenanceTimingInfo::search_first_enabled)
+         .def_readonly("search_first_gain_target", &MaintenanceTimingInfo::search_first_gain_target)
+         .def_readonly("search_first_max_cohort", &MaintenanceTimingInfo::search_first_max_cohort)
+         .def_readonly("search_first_available_gain_ns", &MaintenanceTimingInfo::search_first_available_gain_ns)
+         .def_readonly("search_first_selected_gain_ns", &MaintenanceTimingInfo::search_first_selected_gain_ns)
+         .def_readonly("search_first_selected_gain_fraction", &MaintenanceTimingInfo::search_first_selected_gain_fraction)
+         .def_readonly("search_first_cxl_split_candidate_count", &MaintenanceTimingInfo::search_first_cxl_split_candidate_count)
+         .def_readonly("search_first_cxl_only_split_candidate_count", &MaintenanceTimingInfo::search_first_cxl_only_split_candidate_count)
+         .def_readonly("search_first_selected_cxl_only_split_count", &MaintenanceTimingInfo::search_first_selected_cxl_only_split_count)
+         .def_readonly("resource_forced_action_set", &MaintenanceTimingInfo::resource_forced_action_set)
+         .def_readonly("resource_policy_decisions", &MaintenanceTimingInfo::resource_policy_decisions)
+         .def_readonly("split_lineage", &MaintenanceTimingInfo::split_lineage)
          .def("__repr__", [](const MaintenanceTimingInfo &t) {
              std::ostringstream oss;
              oss << "{";
@@ -306,7 +617,14 @@ PYBIND11_MODULE(_bindings, m) {
              oss << "\"delete_time_us\": " << t.delete_time_us << ", ";
              oss << "\"refinement_time_us\": " << t.refinement_time_us << ", ";
              oss << "\"n_splits\": " << t.n_splits << ", ";
-             oss << "\"n_deletes\": " << t.n_deletes;
+             oss << "\"n_deletes\": " << t.n_deletes << ", ";
+             oss << "\"decision_time_us\": " << t.decision_time_us << ", ";
+             oss << "\"action_time_us\": " << t.action_time_us << ", ";
+             oss << "\"decision_partition_count\": " << t.decision_partition_count << ", ";
+             oss << "\"split_records_read\": " << t.split_records_read << ", ";
+             oss << "\"reassign_records_read\": " << t.reassign_records_read << ", ";
+             oss << "\"partition_count_before\": " << t.partition_count_before << ", ";
+             oss << "\"partition_count_after\": " << t.partition_count_after;
              oss << "}";
              return oss.str();
          });
@@ -362,6 +680,8 @@ PYBIND11_MODULE(_bindings, m) {
              "Number of clusters searched.")
          .def_readwrite("partitions_scanned", &SearchTimingInfo::partitions_scanned,
              "Number of partitions scanned.")
+         .def_readwrite("scanned_partition_ids", &SearchTimingInfo::scanned_partition_ids,
+             "Actual partition ids scanned per query.")
          .def_readwrite("search_params", &SearchTimingInfo::search_params,
              "Parameters used for the search operation.")
          .def_readwrite("parent_info", &SearchTimingInfo::parent_info,
@@ -400,7 +720,8 @@ PYBIND11_MODULE(_bindings, m) {
              }
              oss << "\"n_queries\": " << s.n_queries << ", ";
              oss << "\"n_clusters\": " << s.n_clusters << ", ";
-             oss << "\"partitions_scanned\": " << s.partitions_scanned;
+             oss << "\"partitions_scanned\": " << s.partitions_scanned << ", ";
+             oss << "\"scanned_partition_id_rows\": " << s.scanned_partition_ids.size();
              oss << "}";
              return oss.str();
          });

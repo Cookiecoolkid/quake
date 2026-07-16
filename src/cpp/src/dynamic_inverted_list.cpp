@@ -602,6 +602,8 @@ void DynamicInvertedLists::batch_update_entries(
 
             // IndexPartition part = IndexPartition(nv64, codes, ids, code_size);
             shared_ptr<IndexPartition> part = std::make_shared<IndexPartition>(nv64, codes, ids, code_size);
+            // Loaded vectors form the persisted snapshot, not an unprocessed delta.
+            part->reset_delta();
             partitions_[pid] = part;
 
             // save to free codes and ids since IndexPartition makes its own copies
