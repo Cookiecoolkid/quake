@@ -218,6 +218,20 @@ struct CxlPolicyDecision {
     string rejection_reason;
 };
 
+// A data-free source fragment for reconstructing a refined split child.  Full
+// local refinement may move records between the split children and neighboring
+// partitions, so a child is generally a view over more than its retired
+// parent.  Positions are summarized as exact record counts, cache-line
+// footprints, and source-order run counts without exporting vector IDs.
+struct CxlLineageSourceFragment {
+    int64_t source_id = -1;
+    int64_t source_size = 0;
+    vector<int64_t> child_record_counts;
+    vector<int64_t> child_gather_run_counts;
+    vector<int64_t> child_gather_line_bytes;
+    int64_t membership_bitmap_bytes = 0;
+};
+
 // Exact semantic lineage for a physical Quake split.  This is deliberately
 // data-free: the replay needs child identity, final membership shape, and
 // source-order gather properties, not vector payloads.
@@ -227,7 +241,9 @@ struct CxlSplitLineage {
     vector<int64_t> final_child_sizes;
     vector<int64_t> source_order_gather_run_counts;
     vector<int64_t> child_logical_line_footprint;
+    vector<int64_t> child_gather_line_footprint;
     int64_t membership_bitmap_bytes = 0;
+    vector<CxlLineageSourceFragment> source_fragments;
 };
 
 struct MaintenancePolicyParams {
@@ -577,6 +593,10 @@ struct MaintenanceTimingInfo {
     bool resource_forced_action_set = false;
     vector<CxlPolicyDecision> resource_policy_decisions;
     vector<CxlSplitLineage> split_lineage;
+    vector<int64_t> lineage_source_ids;
+    vector<int64_t> lineage_source_sizes;
+    vector<int64_t> refinement_lineage_source_ids;
+    vector<int64_t> refinement_lineage_source_sizes;
 };
 
 struct SearchResult {

@@ -303,13 +303,23 @@ PYBIND11_MODULE(_bindings, m) {
         .def_readonly("selected", &CxlPolicyDecision::selected)
         .def_readonly("rejection_reason", &CxlPolicyDecision::rejection_reason);
 
+    class_<CxlLineageSourceFragment>(m, "CxlLineageSourceFragment")
+        .def_readonly("source_id", &CxlLineageSourceFragment::source_id)
+        .def_readonly("source_size", &CxlLineageSourceFragment::source_size)
+        .def_readonly("child_record_counts", &CxlLineageSourceFragment::child_record_counts)
+        .def_readonly("child_gather_run_counts", &CxlLineageSourceFragment::child_gather_run_counts)
+        .def_readonly("child_gather_line_bytes", &CxlLineageSourceFragment::child_gather_line_bytes)
+        .def_readonly("membership_bitmap_bytes", &CxlLineageSourceFragment::membership_bitmap_bytes);
+
     class_<CxlSplitLineage>(m, "CxlSplitLineage")
         .def_readonly("parent_id", &CxlSplitLineage::parent_id)
         .def_readonly("child_ids", &CxlSplitLineage::child_ids)
         .def_readonly("final_child_sizes", &CxlSplitLineage::final_child_sizes)
         .def_readonly("source_order_gather_run_counts", &CxlSplitLineage::source_order_gather_run_counts)
         .def_readonly("child_logical_line_footprint", &CxlSplitLineage::child_logical_line_footprint)
-        .def_readonly("membership_bitmap_bytes", &CxlSplitLineage::membership_bitmap_bytes);
+        .def_readonly("child_gather_line_footprint", &CxlSplitLineage::child_gather_line_footprint)
+        .def_readonly("membership_bitmap_bytes", &CxlSplitLineage::membership_bitmap_bytes)
+        .def_readonly("source_fragments", &CxlSplitLineage::source_fragments);
 
     /*********** MaintenancePolicyParams Binding ***********/
     class_<MaintenancePolicyParams, shared_ptr<MaintenancePolicyParams>>(m, "MaintenancePolicyParams")
@@ -609,6 +619,10 @@ PYBIND11_MODULE(_bindings, m) {
          .def_readonly("resource_forced_action_set", &MaintenanceTimingInfo::resource_forced_action_set)
          .def_readonly("resource_policy_decisions", &MaintenanceTimingInfo::resource_policy_decisions)
          .def_readonly("split_lineage", &MaintenanceTimingInfo::split_lineage)
+         .def_readonly("lineage_source_ids", &MaintenanceTimingInfo::lineage_source_ids)
+         .def_readonly("lineage_source_sizes", &MaintenanceTimingInfo::lineage_source_sizes)
+         .def_readonly("refinement_lineage_source_ids", &MaintenanceTimingInfo::refinement_lineage_source_ids)
+         .def_readonly("refinement_lineage_source_sizes", &MaintenanceTimingInfo::refinement_lineage_source_sizes)
          .def("__repr__", [](const MaintenanceTimingInfo &t) {
              std::ostringstream oss;
              oss << "{";

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iostream>
 #include <numeric>
+#include <stdexcept>
 #include <unordered_set>
 #include <torch/torch.h>
 
@@ -69,6 +70,52 @@ float cxl_fanout_penalty_ns(const MaintenancePolicyParams& params,
 
 float clamp01(float value) {
     return std::min(1.0f, std::max(0.0f, value));
+}
+
+int64_t source_order_run_count(vector<int64_t> positions) {
+    if (positions.empty()) {
+        return 0;
+    }
+    std::sort(positions.begin(), positions.end());
+    int64_t runs = 1;
+    for (size_t index = 1; index < positions.size(); ++index) {
+        if (positions[index] != positions[index - 1] + 1) {
+            runs++;
+        }
+    }
+    return runs;
+}
+
+int64_t source_order_gather_line_bytes(vector<int64_t> positions,
+                                       int entry_bytes,
+                                       int line_bytes) {
+    if (positions.empty()) {
+        return 0;
+    }
+    std::sort(positions.begin(), positions.end());
+    const int64_t safe_entry_bytes = std::max(1, entry_bytes);
+    const int64_t safe_line_bytes = std::max(1, line_bytes);
+    int64_t touched_lines = 0;
+    int64_t current_first = -1;
+    int64_t current_last = -1;
+    for (int64_t position : positions) {
+        const int64_t byte_first = std::max<int64_t>(0, position) * safe_entry_bytes;
+        const int64_t byte_last = byte_first + safe_entry_bytes - 1;
+        const int64_t first_line = byte_first / safe_line_bytes;
+        const int64_t last_line = byte_last / safe_line_bytes;
+        if (current_first < 0) {
+            current_first = first_line;
+            current_last = last_line;
+        } else if (first_line <= current_last + 1) {
+            current_last = std::max(current_last, last_line);
+        } else {
+            touched_lines += current_last - current_first + 1;
+            current_first = first_line;
+            current_last = last_line;
+        }
+    }
+    touched_lines += current_last - current_first + 1;
+    return touched_lines * safe_line_bytes;
 }
 
 }  // namespace
@@ -2262,6 +2309,10 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
     int64_t refinement_source_split_count = 0;
     RefinementWorkInfo refinement_work;
     vector<CxlSplitLineage> split_lineage;
+    vector<int64_t> lineage_source_ids;
+    vector<int64_t> lineage_source_sizes;
+    vector<int64_t> refinement_lineage_source_ids;
+    vector<int64_t> refinement_lineage_source_sizes;
     std::unordered_map<int64_t, vector<int64_t>> split_source_order;
     std::unordered_map<int64_t, vector<int64_t>> split_child_ids;
     if (partitions_to_split_tens.numel() > 0) {
@@ -2361,6 +2412,59 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
         partition_manager_->delete_partitions(torch::from_blob(empty_ids.data(), {static_cast<int64_t>(empty_ids.size())}, torch::kInt64));
     }
 
+    // Build a stable record-origin map from the state immediately before local
+    // refinement.  Provisional split children are folded back into their
+    // retired parent source order; neighboring refinement partitions retain
+    // their own source identities.  This makes the refined child views
+    // reconstructible across every source partition/home.
+    std::unordered_map<int64_t, int64_t> split_child_to_parent;
+    for (const auto& pair : split_child_ids) {
+        for (int64_t child_id : pair.second) {
+            split_child_to_parent[child_id] = pair.first;
+        }
+    }
+    std::unordered_map<int64_t, vector<int64_t>> lineage_source_orders =
+        split_source_order;
+    for (const auto& pair : refinement_work.source_orders) {
+        if (split_child_to_parent.count(pair.first) == 0) {
+            lineage_source_orders[pair.first] = pair.second;
+        }
+    }
+    std::unordered_set<int64_t> refinement_logical_sources;
+    for (const auto& pair : refinement_work.source_orders) {
+        auto parent_it = split_child_to_parent.find(pair.first);
+        refinement_logical_sources.insert(
+            parent_it == split_child_to_parent.end() ? pair.first : parent_it->second);
+    }
+    refinement_lineage_source_ids.assign(
+        refinement_logical_sources.begin(), refinement_logical_sources.end());
+    std::sort(
+        refinement_lineage_source_ids.begin(),
+        refinement_lineage_source_ids.end());
+    for (int64_t source_id : refinement_lineage_source_ids) {
+        refinement_lineage_source_sizes.push_back(static_cast<int64_t>(
+            lineage_source_orders.at(source_id).size()));
+    }
+    lineage_source_ids.reserve(lineage_source_orders.size());
+    for (const auto& pair : lineage_source_orders) {
+        lineage_source_ids.push_back(pair.first);
+    }
+    std::sort(lineage_source_ids.begin(), lineage_source_ids.end());
+    std::unordered_map<int64_t, std::pair<int64_t, int64_t>> record_origins;
+    for (int64_t source_id : lineage_source_ids) {
+        const auto& source = lineage_source_orders.at(source_id);
+        lineage_source_sizes.push_back(static_cast<int64_t>(source.size()));
+        for (size_t position = 0; position < source.size(); ++position) {
+            auto inserted = record_origins.emplace(
+                source[position],
+                std::make_pair(source_id, static_cast<int64_t>(position)));
+            if (!inserted.second) {
+                throw std::runtime_error(
+                    "duplicate record origin while constructing CXL split lineage");
+            }
+        }
+    }
+
     // Read child memberships after local refinement and empty-child cleanup.
     // The trace must describe the semantic state Quake leaves behind, rather
     // than the provisional split assignment used before refinement.
@@ -2372,11 +2476,11 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
         CxlSplitLineage lineage;
         lineage.parent_id = parent_id;
         lineage.child_ids = children_it->second;
-        const vector<int64_t>& source = split_source_order[parent_id];
-        lineage.membership_bitmap_bytes =
-            static_cast<int64_t>((source.size() + 7) / 8);
-        for (int64_t child_id : lineage.child_ids) {
-            std::unordered_set<int64_t> members;
+        lineage.source_order_gather_run_counts.assign(lineage.child_ids.size(), 0);
+        lineage.child_gather_line_footprint.assign(lineage.child_ids.size(), 0);
+        std::unordered_map<int64_t, vector<vector<int64_t>>> fragment_positions;
+        for (size_t child_index = 0; child_index < lineage.child_ids.size(); ++child_index) {
+            int64_t child_id = lineage.child_ids[child_index];
             auto child_it = partition_manager_->partition_store_->partitions_.find(child_id);
             if (child_it != partition_manager_->partition_store_->partitions_.end() &&
                 child_it->second != nullptr) {
@@ -2391,24 +2495,61 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                 const int64_t* child_ptr = child_it->second->ids_;
                 if (child_ptr != nullptr) {
                     for (int64_t item = 0; item < child_count; ++item) {
-                        members.insert(child_ptr[item]);
+                        auto origin_it = record_origins.find(child_ptr[item]);
+                        if (origin_it == record_origins.end()) {
+                            throw std::runtime_error(
+                                "refined child record has no pre-refinement CXL source");
+                        }
+                        auto& source_positions =
+                            fragment_positions[origin_it->second.first];
+                        if (source_positions.empty()) {
+                            source_positions.resize(lineage.child_ids.size());
+                        }
+                        source_positions[child_index].push_back(
+                            origin_it->second.second);
                     }
                 }
             } else {
                 lineage.final_child_sizes.push_back(0);
                 lineage.child_logical_line_footprint.push_back(0);
             }
-            int64_t runs = 0;
-            bool in_run = false;
-            for (int64_t source_id : source) {
-                bool current = members.count(source_id) > 0;
-                if (current && !in_run) {
-                    runs++;
-                }
-                in_run = current;
+        }
+        vector<int64_t> fragment_source_ids;
+        fragment_source_ids.reserve(fragment_positions.size());
+        for (const auto& pair : fragment_positions) {
+            fragment_source_ids.push_back(pair.first);
+        }
+        std::sort(fragment_source_ids.begin(), fragment_source_ids.end());
+        vector<int64_t> reconstructed_child_sizes(lineage.child_ids.size(), 0);
+        for (int64_t source_id : fragment_source_ids) {
+            CxlLineageSourceFragment fragment;
+            fragment.source_id = source_id;
+            fragment.source_size = static_cast<int64_t>(
+                lineage_source_orders.at(source_id).size());
+            fragment.membership_bitmap_bytes =
+                static_cast<int64_t>(lineage.child_ids.size()) *
+                ((fragment.source_size + 7) / 8);
+            lineage.membership_bitmap_bytes += fragment.membership_bitmap_bytes;
+            for (size_t child_index = 0; child_index < lineage.child_ids.size(); ++child_index) {
+                const auto& positions = fragment_positions[source_id][child_index];
+                const int64_t records = static_cast<int64_t>(positions.size());
+                const int64_t runs = source_order_run_count(positions);
+                const int64_t gather_bytes = source_order_gather_line_bytes(
+                    positions,
+                    params_->cxl_entry_bytes,
+                    params_->cxl_line_bytes);
+                fragment.child_record_counts.push_back(records);
+                fragment.child_gather_run_counts.push_back(runs);
+                fragment.child_gather_line_bytes.push_back(gather_bytes);
+                reconstructed_child_sizes[child_index] += records;
+                lineage.source_order_gather_run_counts[child_index] += runs;
+                lineage.child_gather_line_footprint[child_index] += gather_bytes;
             }
-            lineage.source_order_gather_run_counts.push_back(
-                members.empty() ? 0 : std::max<int64_t>(1, runs));
+            lineage.source_fragments.push_back(std::move(fragment));
+        }
+        if (reconstructed_child_sizes != lineage.final_child_sizes) {
+            throw std::runtime_error(
+                "CXL split lineage does not reconstruct refined child sizes");
         }
         split_lineage.push_back(std::move(lineage));
     }
@@ -2534,6 +2675,12 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
     timing_info->resource_policy_decisions = std::move(
         resource_policy_decisions);
     timing_info->split_lineage = std::move(split_lineage);
+    timing_info->lineage_source_ids = std::move(lineage_source_ids);
+    timing_info->lineage_source_sizes = std::move(lineage_source_sizes);
+    timing_info->refinement_lineage_source_ids = std::move(
+        refinement_lineage_source_ids);
+    timing_info->refinement_lineage_source_sizes = std::move(
+        refinement_lineage_source_sizes);
 
     if (params_->enable_cxl_cost_model &&
         (params_->cxl_workload_adaptive || cxl_use_streaming_rent_buy() ||
@@ -2602,6 +2749,23 @@ MaintenancePolicy::RefinementWorkInfo MaintenancePolicy::local_refinement(
     work.iterations = std::max(1, params_->refinement_iterations);
     work.records_read = work.records_per_iteration * work.iterations;
     work.records_written = work.records_per_iteration;
+    Tensor refine_ids_cpu = refine_ids.to(torch::kCPU).contiguous();
+    const int64_t* refine_id_ptr = refine_ids_cpu.data_ptr<int64_t>();
+    for (int64_t index = 0; index < refine_ids_cpu.numel(); ++index) {
+        const int64_t source_id = refine_id_ptr[index];
+        auto source_it = partition_manager_->partition_store_->partitions_.find(source_id);
+        if (source_it == partition_manager_->partition_store_->partitions_.end() ||
+            source_it->second == nullptr) {
+            continue;
+        }
+        const int64_t count = std::max<int64_t>(0, source_it->second->num_vectors_);
+        const int64_t* ids = source_it->second->ids_;
+        if (ids != nullptr) {
+            work.source_orders[source_id] = vector<int64_t>(ids, ids + count);
+        } else {
+            work.source_orders[source_id] = {};
+        }
+    }
     partition_manager_->refine_partitions(refine_ids, params_->refinement_iterations);
     return work;
 }

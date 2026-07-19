@@ -68,6 +68,7 @@ class MaintenancePolicy {
     int64_t records_read = 0;
     int64_t records_written = 0;
     int64_t iterations = 0;
+    std::unordered_map<int64_t, vector<int64_t>> source_orders;
   };
 
   RefinementWorkInfo local_refinement(const Tensor& partition_ids);
