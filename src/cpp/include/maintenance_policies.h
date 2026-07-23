@@ -89,6 +89,8 @@ private:
   bool cxl_use_resource_rent_buy() const;
   bool cxl_use_streaming_staged() const;
   bool cxl_use_search_first() const;
+  bool cxl_use_default_plus() const;
+  bool cxl_use_search_guarded_plus() const;
   bool cxl_use_observed_action_cost() const;
   struct StreamingSplitRent {
     float local_ns = 0.0f;

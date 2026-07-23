@@ -156,6 +156,8 @@ constexpr bool DEFAULT_CXL_RESOURCE_RENT_BUY = false;
 constexpr bool DEFAULT_CXL_SEARCH_FIRST = false;
 constexpr float DEFAULT_CXL_SEARCH_FIRST_GAIN_TARGET = 0.90f;
 constexpr int DEFAULT_CXL_SEARCH_FIRST_MAX_COHORT = 24;
+constexpr bool DEFAULT_CXL_DEFAULT_PLUS = false;
+constexpr bool DEFAULT_CXL_SEARCH_GUARDED_PLUS = false;
 
 const vector<int> DEFAULT_LATENCY_ESTIMATOR_RANGE_N = {1, 2, 4, 16, 64, 256, 1024, 4096, 16384, 65536};   ///< Default range of n values for latency estimator.
 const vector<int> DEFAULT_LATENCY_ESTIMATOR_RANGE_K = {1, 4, 16, 64, 256};                                ///< Default range of k values for latency estimator.
@@ -331,6 +333,12 @@ struct MaintenancePolicyParams {
     bool cxl_search_first = DEFAULT_CXL_SEARCH_FIRST;
     float cxl_search_first_gain_target = DEFAULT_CXL_SEARCH_FIRST_GAIN_TARGET;
     int cxl_search_first_max_cohort = DEFAULT_CXL_SEARCH_FIRST_MAX_COHORT;
+    // Preserve native Quake decisions, then repay a causal fraction of the
+    // current hot/oversized partition growth debt under CXL headroom.
+    bool cxl_default_plus = DEFAULT_CXL_DEFAULT_PLUS;
+    // Native Quake actions plus causally priced, search-positive CXL-only
+    // splits.  Physical materialization cost is telemetry, not a veto.
+    bool cxl_search_guarded_plus = DEFAULT_CXL_SEARCH_GUARDED_PLUS;
     // Audit-only override for replaying a candidate-set prefix from the same
     // checkpoint. Empty vectors with this flag set mean no optional actions.
     bool cxl_resource_force_action_set = false;

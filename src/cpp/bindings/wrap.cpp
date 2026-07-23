@@ -452,6 +452,10 @@ PYBIND11_MODULE(_bindings, m) {
              "Fraction of available current search gain targeted by search-first maintenance.")
         .def_readwrite("cxl_search_first_max_cohort", &MaintenancePolicyParams::cxl_search_first_max_cohort,
              "Maximum split cohort selected by search-first maintenance.")
+        .def_readwrite("cxl_default_plus", &MaintenancePolicyParams::cxl_default_plus,
+             "Preserve native Quake actions and add at most one resource-safe CXL split per window.")
+        .def_readwrite("cxl_search_guarded_plus", &MaintenancePolicyParams::cxl_search_guarded_plus,
+             "Preserve native Quake actions and add only causally search-positive CXL splits.")
         .def_readwrite("cxl_resource_force_action_set", &MaintenancePolicyParams::cxl_resource_force_action_set,
              "Audit-only: execute exactly the requested optional resource-policy candidates.")
         .def_readwrite("cxl_resource_force_window_id", &MaintenancePolicyParams::cxl_resource_force_window_id,
@@ -522,6 +526,8 @@ PYBIND11_MODULE(_bindings, m) {
             oss << "\"cxl_search_first\": " << (m.cxl_search_first ? "true" : "false") << ", ";
             oss << "\"cxl_search_first_gain_target\": " << m.cxl_search_first_gain_target << ", ";
             oss << "\"cxl_search_first_max_cohort\": " << m.cxl_search_first_max_cohort << ", ";
+            oss << "\"cxl_default_plus\": " << (m.cxl_default_plus ? "true" : "false") << ", ";
+            oss << "\"cxl_search_guarded_plus\": " << (m.cxl_search_guarded_plus ? "true" : "false") << ", ";
             oss << "\"cxl_resource_force_action_set\": " << (m.cxl_resource_force_action_set ? "true" : "false") << ", ";
             oss << "\"cxl_resource_force_window_id\": " << m.cxl_resource_force_window_id;
             oss << "}";

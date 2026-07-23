@@ -368,7 +368,8 @@ bool MaintenancePolicy::cxl_use_streaming_rent_buy() const {
 bool MaintenancePolicy::cxl_use_resource_rent_buy() const {
     return params_->enable_cxl_cost_model &&
            (params_->cxl_resource_rent_buy || params_->cxl_search_first ||
-            params_->cxl_streaming_staged);
+            params_->cxl_streaming_staged || params_->cxl_default_plus ||
+            params_->cxl_search_guarded_plus);
 }
 
 bool MaintenancePolicy::cxl_use_streaming_staged() const {
@@ -377,6 +378,15 @@ bool MaintenancePolicy::cxl_use_streaming_staged() const {
 
 bool MaintenancePolicy::cxl_use_search_first() const {
     return params_->enable_cxl_cost_model && params_->cxl_search_first;
+}
+
+bool MaintenancePolicy::cxl_use_default_plus() const {
+    return params_->enable_cxl_cost_model && params_->cxl_default_plus;
+}
+
+bool MaintenancePolicy::cxl_use_search_guarded_plus() const {
+    return params_->enable_cxl_cost_model &&
+           params_->cxl_search_guarded_plus;
 }
 
 bool MaintenancePolicy::cxl_use_observed_action_cost() const {
@@ -1077,12 +1087,14 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
             float native_rent_ns =
                 std::max(0.0f, -native_reassign_delta_ns) *
                 static_cast<float>(std::max<int64_t>(1, recorded_queries));
-            float rent_ns = cxl_use_search_first()
+            float rent_ns = (cxl_use_search_first() || cxl_use_default_plus() ||
+                             cxl_use_search_guarded_plus())
                                 ? resource_rent_ns
                                 : std::max(resource_rent_ns, native_rent_ns);
             bool native_legal_candidate =
                 native_reassign_delta_ns < -params_->delete_threshold_ns &&
-                rent_ns > 0.0f;
+                (rent_ns > 0.0f || cxl_use_default_plus() ||
+                 cxl_use_search_guarded_plus());
             float buy_ns = cxl_resource_reassign_buy_ns(
                 partition_id, partition_size);
             float& credit_ns = cxl_reassign_credit_ns_[partition_id];
@@ -1124,7 +1136,9 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
             resource_policy_decisions.push_back(decision);
             resource_window_rent_ns += rent_ns;
             if ((!resource_force_mode && native_legal_candidate &&
-                 (ratio >= 1.0f || search_first_candidate)) ||
+                 (ratio >= 1.0f || search_first_candidate ||
+                  cxl_use_default_plus() ||
+                  cxl_use_search_guarded_plus())) ||
                 resource_force_active) {
                 resource_action_candidates.push_back(
                     {false,
@@ -1225,7 +1239,17 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                                  cxl_window_amortized_penalty_ns(*params_, partition_size);
                     }
 
-                    if (cxl_use_resource_rent_buy()) {
+                    if (cxl_use_default_plus() ||
+                        cxl_use_search_guarded_plus()) {
+                        // Preserve the native delete-rejection decision.  A
+                        // partition reaching this branch is only a candidate;
+                        // default deletes it iff reassignment remains a net
+                        // win after the exact target-set calculation above.
+                        if (delta < -params_->delete_threshold_ns) {
+                            partitions_to_delete.push_back(partition_id);
+                            choose_partition = true;
+                        }
+                    } else if (cxl_use_resource_rent_buy()) {
                         accumulate_resource_reassign(
                             partition_id,
                             partition_size,
@@ -1242,7 +1266,12 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                         partitions_to_delete.push_back(partition_id);
                     }
                 } else {
-                    if (cxl_use_resource_rent_buy()) {
+                    if (cxl_use_default_plus() ||
+                        cxl_use_search_guarded_plus()) {
+                        // Match default's no-rejection / too-small fallback.
+                        partitions_to_delete.push_back(partition_id);
+                        choose_partition = true;
+                    } else if (cxl_use_resource_rent_buy()) {
                         CxlPolicyDecision decision;
                         decision.action_kind = "reassign";
                         decision.partition_id = partition_id;
@@ -1280,7 +1309,9 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                         float before_ns = static_cast<float>(std::max(0, hit_count)) *
                                           cxl_resource_scan_cost_ns(
                                               partition_id, partition_size);
-                        float child_scan_cost_ns = cxl_use_search_first()
+                        float child_scan_cost_ns =
+                            (cxl_use_search_first() || cxl_use_default_plus() ||
+                             cxl_use_search_guarded_plus())
                                                        ? cxl_resource_balanced_birth_scan_cost_ns(
                                                              child_size)
                                                        : cxl_resource_scan_cost_ns(
@@ -1295,7 +1326,9 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                         // candidate semantics. Search-first is independent:
                         // its candidate and value are the causal CXL search
                         // saving from the previous resource-price window.
-                        float rent_ns = (cxl_use_search_first() || cxl_use_streaming_staged())
+                        float rent_ns = (cxl_use_search_first() || cxl_use_streaming_staged() ||
+                                         cxl_use_default_plus() ||
+                                         cxl_use_search_guarded_plus())
                                             ? resource_rent_ns
                                             : std::max(resource_rent_ns, native_rent_ns);
                         float variable_buy_ns = cxl_resource_split_variable_buy_ns(
@@ -1306,16 +1339,27 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                         float& credit_ns = cxl_split_credit_ns_[partition_id];
                         credit_ns = cxl_use_streaming_staged()
                             ? 0.75f * credit_ns + 0.25f * rent_ns
+                            : (cxl_use_default_plus() ||
+                               cxl_use_search_guarded_plus())
+                            ? rent_ns
                             : 0.5f * credit_ns + rent_ns;
-                        if (cxl_use_streaming_staged()) {
+                        if (cxl_use_streaming_staged() || cxl_use_default_plus() ||
+                            cxl_use_search_guarded_plus()) {
                             // Logical work reads once and writes only
                             // descriptors/centroids/bitmap metadata.  Payload
                             // materialization is deferred to the simulator.
+                            const float metadata_price_ns_per_byte =
+                                cxl_resource_price_snapshot_ != nullptr
+                                    ? std::max(
+                                          0.0f,
+                                          cxl_resource_price_snapshot_->
+                                              routing_metadata_shadow_price_ns_per_byte)
+                                    : 0.0f;
                             single_buy_ns = std::max(
                                 1.0f,
                                 0.25f * variable_buy_ns +
                                     2.0f * std::max(0, params_->cxl_metadata_bytes) *
-                                        std::max(0.0f, cxl_resource_price_snapshot_->routing_metadata_shadow_price_ns_per_byte));
+                                        metadata_price_ns_per_byte);
                         }
                         float ratio = credit_ns / std::max(1.0f, single_buy_ns);
                         CxlPolicyDecision decision;
@@ -1340,15 +1384,48 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                             params_->cxl_line_bytes);
                         decision.write_line_bytes = decision.read_line_bytes;
                         bool native_legal_candidate =
-                            native_should_split && rent_ns > 0.0f;
+                            native_should_split &&
+                            (rent_ns > 0.0f || cxl_use_default_plus() ||
+                             cxl_use_search_guarded_plus());
                         bool search_first_candidate =
                             cxl_use_search_first() &&
                             decision.cxl_search_profitable;
-                        bool eligible_candidate = cxl_use_streaming_staged()
-                                                      ? (cxl_staged_calibration_r_ * resource_rent_ns > single_buy_ns)
-                                                      : (cxl_use_search_first()
-                                                      ? search_first_candidate
-                                                      : native_legal_candidate);
+                        bool default_plus_growth_candidate =
+                            cxl_use_default_plus() &&
+                            structural_split_debt > 0 &&
+                            hit_count > 0 &&
+                            partition_size >= structural_size_threshold;
+                        bool default_plus_candidate =
+                            cxl_use_default_plus() &&
+                            (native_should_split ||
+                             (decision.cxl_search_profitable && resource_rent_ns > single_buy_ns) ||
+                             default_plus_growth_candidate);
+                        const bool guarded_has_prior_price =
+                            cxl_use_search_guarded_plus() &&
+                            cxl_resource_price_snapshot_ != nullptr &&
+                            cxl_resource_price_snapshot_->valid &&
+                            cxl_resource_price_snapshot_->window_duration_ns > 0;
+                        const bool search_guarded_candidate =
+                            cxl_use_search_guarded_plus() &&
+                            (native_should_split ||
+                             (guarded_has_prior_price &&
+                              structural_split_debt > 0 &&
+                              hit_count > 0 &&
+                              partition_size >= structural_size_threshold &&
+                              resource_rent_ns > 0.0f));
+                        bool eligible_candidate = native_legal_candidate;
+                        if (cxl_use_streaming_staged()) {
+                            eligible_candidate =
+                                cxl_staged_calibration_r_ *
+                                    resource_rent_ns >
+                                single_buy_ns;
+                        } else if (cxl_use_search_guarded_plus()) {
+                            eligible_candidate = search_guarded_candidate;
+                        } else if (cxl_use_default_plus()) {
+                            eligible_candidate = default_plus_candidate;
+                        } else if (cxl_use_search_first()) {
+                            eligible_candidate = search_first_candidate;
+                        }
                         if (cxl_use_search_first()) {
                             decision.rejection_reason = search_first_candidate
                                                             ? "pending_cxl_search_selection"
@@ -1363,6 +1440,24 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                             decision.rejection_reason = eligible_candidate
                                 ? "pending_staged_utilization_selection"
                                 : "staged_benefit_below_logical_buy";
+                        } else if (cxl_use_default_plus() ||
+                                   cxl_use_search_guarded_plus()) {
+                            if (native_should_split) {
+                                decision.rejection_reason =
+                                    "pending_native_default_selection";
+                            } else if (eligible_candidate) {
+                                decision.rejection_reason =
+                                    cxl_use_search_guarded_plus()
+                                        ? "pending_search_guarded_selection"
+                                        : (default_plus_growth_candidate
+                                               ? "pending_default_plus_growth_selection"
+                                               : "pending_default_plus_selection");
+                            } else {
+                                decision.rejection_reason =
+                                    guarded_has_prior_price
+                                        ? "cxl_search_benefit_nonpositive"
+                                        : "missing_prior_resource_price";
+                            }
                         } else {
                             decision.rejection_reason = native_legal_candidate
                                                             ? "pending_cohort_selection"
@@ -1383,6 +1478,16 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                                  rent_ns,
                                  partition_size,
                                  decision_index});
+                            if ((cxl_use_default_plus() ||
+                                 cxl_use_search_guarded_plus()) &&
+                                native_should_split) {
+                                // Native Quake would commit this choice before
+                                // the later delete-factor fallback.  Mark it
+                                // chosen now so default-plus preserves that
+                                // control-flow priority while deferring only
+                                // the physical cohort commit.
+                                choose_partition = true;
+                            }
                         } else if (!resource_force_mode) {
                             split_candidate_roi_rejected_count++;
                         }
@@ -1516,7 +1621,15 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                 }
                 return lhs_density > rhs_density;
             };
-            std::sort(split_actions.begin(), split_actions.end(), candidate_order);
+            // default-plus is intentionally "native Quake + at most one CXL
+            // increment".  Preserve the native candidates' original
+            // all_partition_ids order because split order affects the joint
+            // refinement neighborhood and therefore child membership.  The
+            // one CXL-only increment is ranked separately below.
+            if (!cxl_use_default_plus() &&
+                !cxl_use_search_guarded_plus()) {
+                std::sort(split_actions.begin(), split_actions.end(), candidate_order);
+            }
             std::sort(reassign_actions.begin(), reassign_actions.end(), candidate_order);
 
             const int64_t cohort_id = cxl_resource_price_snapshot_ != nullptr
@@ -1642,6 +1755,296 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                             total_buy_ns,
                             search_gain_ns,
                             search_gain_ns);
+                    }
+                } else if (cxl_use_search_guarded_plus() &&
+                           !eligible_splits.empty()) {
+                    // Native Quake is the base action set.  CXL-only additions
+                    // require a completed prior price window and strictly
+                    // positive predicted search gain; their physical buy is
+                    // reported but never used as a search veto.
+                    vector<ResourceActionCandidate> native_splits;
+                    vector<ResourceActionCandidate> cxl_only_splits;
+                    for (const auto& candidate : eligible_splits) {
+                        const CxlPolicyDecision& decision =
+                            resource_policy_decisions[
+                                candidate.decision_index];
+                        (decision.native_legal
+                             ? native_splits
+                             : cxl_only_splits)
+                            .push_back(candidate);
+                    }
+                    if (!native_splits.empty()) {
+                        float native_credit_ns = 0.0f;
+                        float native_buy_ns = 0.0f;
+                        float native_gain_ns = 0.0f;
+                        for (const auto& candidate : native_splits) {
+                            native_credit_ns += candidate.credit_ns;
+                            native_buy_ns += candidate.buy_ns;
+                            native_gain_ns += candidate.search_gain_ns;
+                        }
+                        commit_split_cohort(
+                            native_splits,
+                            native_credit_ns,
+                            native_buy_ns,
+                            0.0f,
+                            native_buy_ns,
+                            native_gain_ns,
+                            native_gain_ns);
+                    }
+                    std::sort(
+                        cxl_only_splits.begin(),
+                        cxl_only_splits.end(),
+                        [&](const ResourceActionCandidate& lhs,
+                            const ResourceActionCandidate& rhs) {
+                            const CxlPolicyDecision& lhs_decision =
+                                resource_policy_decisions[
+                                    lhs.decision_index];
+                            const CxlPolicyDecision& rhs_decision =
+                                resource_policy_decisions[
+                                    rhs.decision_index];
+                            const float lhs_relative =
+                                lhs.search_gain_ns /
+                                std::max(
+                                    1.0f,
+                                    lhs_decision.cost_before_ns);
+                            const float rhs_relative =
+                                rhs.search_gain_ns /
+                                std::max(
+                                    1.0f,
+                                    rhs_decision.cost_before_ns);
+                            if (lhs_relative != rhs_relative) {
+                                return lhs_relative > rhs_relative;
+                            }
+                            if (lhs.search_gain_ns !=
+                                rhs.search_gain_ns) {
+                                return lhs.search_gain_ns >
+                                       rhs.search_gain_ns;
+                            }
+                            return lhs.partition_id <
+                                   rhs.partition_id;
+                        });
+                    const int remaining_growth_debt = std::max(
+                        0,
+                        structural_split_debt -
+                            static_cast<int>(native_splits.size()));
+                    const int extra_split_budget =
+                        static_cast<int>(std::ceil(
+                            static_cast<float>(
+                                remaining_growth_debt) *
+                            std::max(
+                                0.0f,
+                                params_->
+                                    cxl_adaptive_growth_debt_repay_fraction)));
+                    int added_cxl_splits = 0;
+                    std::unordered_map<string, float>
+                        added_bytes_by_resource;
+                    for (const auto& candidate : cxl_only_splits) {
+                        CxlPolicyDecision& decision =
+                            resource_policy_decisions[
+                                candidate.decision_index];
+                        if (added_cxl_splits >= extra_split_budget) {
+                            decision.rejection_reason =
+                                "search_guarded_growth_debt_budget";
+                            continue;
+                        }
+                        bool utilization_ok = true;
+                        const float logical_bytes =
+                            static_cast<float>(
+                                round_up_line_bytes(
+                                    candidate.records,
+                                    params_->cxl_entry_bytes,
+                                    params_->cxl_line_bytes) +
+                                2 * std::max(
+                                        0,
+                                        params_->cxl_metadata_bytes) +
+                                std::max<int64_t>(
+                                    0,
+                                    (candidate.records + 7) / 8));
+                        const string parent_home =
+                            "mc:" +
+                            std::to_string(
+                                cxl_resource_home_id(
+                                    candidate.partition_id));
+                        const string parent_link =
+                            "link:" +
+                            std::to_string(
+                                cxl_resource_home_id(
+                                    candidate.partition_id));
+                        if (cxl_resource_price_snapshot_ != nullptr) {
+                            for (const auto& resource :
+                                 cxl_resource_price_snapshot_->
+                                     resources) {
+                                const bool affected =
+                                    resource.resource_id ==
+                                        parent_home ||
+                                    resource.resource_id ==
+                                        parent_link;
+                                if (!affected ||
+                                    resource.utilization <= 0.0f ||
+                                    resource.demand_bytes <= 0) {
+                                    continue;
+                                }
+                                const float capacity_bytes =
+                                    static_cast<float>(
+                                        resource.demand_bytes) /
+                                    resource.utilization;
+                                const float projected =
+                                    resource.utilization +
+                                    (added_bytes_by_resource[
+                                         resource.resource_id] +
+                                     logical_bytes) /
+                                        std::max(
+                                            1.0f,
+                                            capacity_bytes);
+                                if (projected >= 0.90f) {
+                                    utilization_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!utilization_ok) {
+                            decision.rejection_reason =
+                                "projected_resource_utilization";
+                            split_candidate_budget_rejected_count++;
+                            continue;
+                        }
+                        vector<ResourceActionCandidate> singleton = {
+                            candidate};
+                        commit_split_cohort(
+                            singleton,
+                            candidate.credit_ns,
+                            candidate.buy_ns,
+                            0.0f,
+                            candidate.buy_ns,
+                            candidate.search_gain_ns,
+                            candidate.search_gain_ns);
+                        added_cxl_splits++;
+                        added_bytes_by_resource[parent_home] +=
+                            logical_bytes;
+                        added_bytes_by_resource[parent_link] +=
+                            logical_bytes;
+                    }
+                } else if (cxl_use_default_plus() && !eligible_splits.empty()) {
+                    // Keep Quake's native split set intact, then repay a
+                    // causal fraction of the current structural growth debt.
+                    // Only lists observed in this query window and already
+                    // above the initial-size guard enter the extra cohort.
+                    vector<ResourceActionCandidate> native_splits;
+                    vector<ResourceActionCandidate> cxl_only_splits;
+                    for (const auto& candidate : eligible_splits) {
+                        const CxlPolicyDecision& decision =
+                            resource_policy_decisions[candidate.decision_index];
+                        (decision.native_legal ? native_splits : cxl_only_splits)
+                            .push_back(candidate);
+                    }
+                    std::sort(
+                        cxl_only_splits.begin(),
+                        cxl_only_splits.end(),
+                        [&](const ResourceActionCandidate& lhs,
+                            const ResourceActionCandidate& rhs) {
+                            const int64_t lhs_excess = std::max<int64_t>(
+                                0, lhs.records - cxl_target_partition_size_);
+                            const int64_t rhs_excess = std::max<int64_t>(
+                                0, rhs.records - cxl_target_partition_size_);
+                            const int64_t lhs_pressure = lhs_excess *
+                                static_cast<int64_t>(aggregated_hits.at(lhs.partition_id));
+                            const int64_t rhs_pressure = rhs_excess *
+                                static_cast<int64_t>(aggregated_hits.at(rhs.partition_id));
+                            if (lhs_pressure != rhs_pressure) {
+                                return lhs_pressure > rhs_pressure;
+                            }
+                            return candidate_order(lhs, rhs);
+                        });
+                    if (!native_splits.empty()) {
+                        float native_credit_ns = 0.0f;
+                        float native_buy_ns = 0.0f;
+                        float native_gain_ns = 0.0f;
+                        for (const auto& candidate : native_splits) {
+                            native_credit_ns += candidate.credit_ns;
+                            native_buy_ns += candidate.buy_ns;
+                            native_gain_ns += candidate.search_gain_ns;
+                        }
+                        commit_split_cohort(
+                            native_splits,
+                            native_credit_ns,
+                            native_buy_ns,
+                            0.0f,
+                            native_buy_ns,
+                            native_gain_ns,
+                            native_gain_ns);
+                    }
+
+                    const int remaining_growth_debt = std::max(
+                        0,
+                        structural_split_debt -
+                            static_cast<int>(native_splits.size()));
+                    const int extra_split_budget = static_cast<int>(std::ceil(
+                        static_cast<float>(remaining_growth_debt) *
+                        std::max(
+                            0.0f,
+                            params_->cxl_adaptive_growth_debt_repay_fraction)));
+                    int added_cxl_splits = 0;
+                    std::unordered_map<string, float> added_bytes_by_resource;
+                    for (const auto& candidate : cxl_only_splits) {
+                        CxlPolicyDecision& decision =
+                            resource_policy_decisions[candidate.decision_index];
+                        if (added_cxl_splits >= extra_split_budget) {
+                            decision.rejection_reason = "default_plus_growth_debt_budget";
+                            continue;
+                        }
+                        bool utilization_ok = true;
+                        const float logical_bytes = static_cast<float>(
+                            round_up_line_bytes(
+                                candidate.records,
+                                params_->cxl_entry_bytes,
+                                params_->cxl_line_bytes) +
+                            2 * std::max(0, params_->cxl_metadata_bytes) +
+                            std::max<int64_t>(0, (candidate.records + 7) / 8));
+                        if (cxl_resource_price_snapshot_ != nullptr) {
+                            const string parent_home = "mc:" +
+                                std::to_string(cxl_resource_home_id(candidate.partition_id));
+                            const string parent_link = "link:" +
+                                std::to_string(cxl_resource_home_id(candidate.partition_id));
+                            for (const auto& resource : cxl_resource_price_snapshot_->resources) {
+                                const bool affected = resource.resource_id == parent_home ||
+                                    resource.resource_id == parent_link;
+                                if (!affected || resource.utilization <= 0.0f ||
+                                    resource.demand_bytes <= 0) {
+                                    continue;
+                                }
+                                const float capacity_bytes =
+                                    static_cast<float>(resource.demand_bytes) /
+                                    resource.utilization;
+                                const float projected = resource.utilization +
+                                    (added_bytes_by_resource[resource.resource_id] + logical_bytes) /
+                                        std::max(1.0f, capacity_bytes);
+                                if (projected >= 0.90f) {
+                                    utilization_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!utilization_ok) {
+                            decision.rejection_reason = "projected_resource_utilization";
+                            split_candidate_budget_rejected_count++;
+                            continue;
+                        }
+                        vector<ResourceActionCandidate> singleton = {candidate};
+                        commit_split_cohort(
+                            singleton,
+                            candidate.credit_ns,
+                            candidate.buy_ns,
+                            0.0f,
+                            candidate.buy_ns,
+                            candidate.search_gain_ns,
+                            candidate.search_gain_ns);
+                        added_cxl_splits++;
+                        const string parent_home = "mc:" +
+                            std::to_string(cxl_resource_home_id(candidate.partition_id));
+                        const string parent_link = "link:" +
+                            std::to_string(cxl_resource_home_id(candidate.partition_id));
+                        added_bytes_by_resource[parent_home] += logical_bytes;
+                        added_bytes_by_resource[parent_link] += logical_bytes;
                     }
                 } else if (cxl_use_streaming_staged() && !eligible_splits.empty()) {
                     // No cohort cap, gain-coverage target, or workload label:
@@ -1908,6 +2311,24 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                     for (const auto& candidate : reassign_actions) {
                         resource_policy_decisions[candidate.decision_index].rejection_reason =
                             "staged_policy_split_only";
+                    }
+                } else if ((cxl_use_default_plus() ||
+                            cxl_use_search_guarded_plus()) &&
+                           !resource_force_active) {
+                    // Default-plus changes only split admission.  Preserve all
+                    // native Quake reassignments exactly.
+                    for (const auto& candidate : reassign_actions) {
+                        CxlPolicyDecision& decision =
+                            resource_policy_decisions[candidate.decision_index];
+                        if (selected_ids.count(candidate.partition_id) > 0) {
+                            decision.rejection_reason = "conflicting_or_mandatory_action";
+                            continue;
+                        }
+                        partitions_to_delete.push_back(candidate.partition_id);
+                        cxl_reassign_credit_ns_.erase(candidate.partition_id);
+                        selected_ids.insert(candidate.partition_id);
+                        decision.selected = true;
+                        decision.rejection_reason.clear();
                     }
                 } else if (cxl_use_search_first() && !resource_force_active) {
                     vector<ResourceActionCandidate> eligible_reassigns;
