@@ -174,6 +174,9 @@ struct CxlResourcePrice {
     // Prior-window byte demand lets online admission project an added logical
     // split without observing a future query window.
     int64_t demand_bytes = 0;
+    // Explicit capacity is required for cold resources whose prior-window
+    // demand and utilization are both zero.
+    int64_t capacity_bytes = 0;
 };
 
 struct CxlResourcePriceSnapshot {
@@ -182,6 +185,8 @@ struct CxlResourcePriceSnapshot {
     vector<CxlResourcePrice> resources;
     vector<float> home_read_byte_price_ns;
     vector<float> home_read_op_price_ns;
+    // Map each MC home to its enclosing device-link identifier.
+    vector<int> home_device_ids;
     unordered_map<int64_t, int> list_home_ids;
     float maintenance_read_byte_price_ns = 0.0f;
     float maintenance_write_byte_price_ns = 0.0f;

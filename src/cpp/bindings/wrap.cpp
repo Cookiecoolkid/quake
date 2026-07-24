@@ -256,7 +256,8 @@ PYBIND11_MODULE(_bindings, m) {
         .def_readwrite("byte_price_ns", &CxlResourcePrice::byte_price_ns)
         .def_readwrite("op_price_ns", &CxlResourcePrice::op_price_ns)
         .def_readwrite("utilization", &CxlResourcePrice::utilization)
-        .def_readwrite("demand_bytes", &CxlResourcePrice::demand_bytes);
+        .def_readwrite("demand_bytes", &CxlResourcePrice::demand_bytes)
+        .def_readwrite("capacity_bytes", &CxlResourcePrice::capacity_bytes);
 
     class_<CxlResourcePriceSnapshot, shared_ptr<CxlResourcePriceSnapshot>>(
         m, "CxlResourcePriceSnapshot")
@@ -266,6 +267,7 @@ PYBIND11_MODULE(_bindings, m) {
         .def_readwrite("resources", &CxlResourcePriceSnapshot::resources)
         .def_readwrite("home_read_byte_price_ns", &CxlResourcePriceSnapshot::home_read_byte_price_ns)
         .def_readwrite("home_read_op_price_ns", &CxlResourcePriceSnapshot::home_read_op_price_ns)
+        .def_readwrite("home_device_ids", &CxlResourcePriceSnapshot::home_device_ids)
         .def_readwrite("list_home_ids", &CxlResourcePriceSnapshot::list_home_ids)
         .def_readwrite("maintenance_read_byte_price_ns", &CxlResourcePriceSnapshot::maintenance_read_byte_price_ns)
         .def_readwrite("maintenance_write_byte_price_ns", &CxlResourcePriceSnapshot::maintenance_write_byte_price_ns)

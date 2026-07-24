@@ -920,9 +920,15 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                       << " queries required." << std::endl;
             return std::make_shared<MaintenanceTimingInfo>();
         }
+        const bool search_guarded_has_prior_price =
+            cxl_use_search_guarded_plus() &&
+            cxl_resource_price_snapshot_ != nullptr &&
+            cxl_resource_price_snapshot_->valid &&
+            cxl_resource_price_snapshot_->window_duration_ns > 0;
         if (cxl_use_resource_rent_buy() &&
             (cxl_resource_price_snapshot_ == nullptr ||
-             !cxl_resource_price_snapshot_->valid)) {
+             !cxl_resource_price_snapshot_->valid) &&
+            !cxl_use_search_guarded_plus()) {
             throw std::runtime_error(
                 "cxl_resource_rent_buy requires a valid resource price snapshot.");
         }
@@ -956,6 +962,27 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
         float structural_size_ratio = std::max(1.0f, params_->cxl_adaptive_structural_size_ratio);
         int structural_size_threshold = static_cast<int>(std::ceil(
             static_cast<float>(std::max(1, cxl_target_partition_size_)) * structural_size_ratio));
+        auto device_for_home = [&](int home_id) {
+            if (cxl_resource_price_snapshot_ != nullptr &&
+                home_id >= 0 &&
+                home_id < static_cast<int>(
+                    cxl_resource_price_snapshot_->home_device_ids.size())) {
+                return cxl_resource_price_snapshot_->home_device_ids[home_id];
+            }
+            // Backward-compatible snapshots used one MC per device.
+            return home_id;
+        };
+        auto resource_capacity_bytes = [](const CxlResourcePrice& resource) {
+            if (resource.capacity_bytes > 0) {
+                return static_cast<float>(resource.capacity_bytes);
+            }
+            if (resource.utilization > 0.0f &&
+                resource.demand_bytes > 0) {
+                return static_cast<float>(resource.demand_bytes) /
+                    resource.utilization;
+            }
+            return 0.0f;
+        };
         float current_scan_fraction = hit_count_tracker_->get_current_scan_fraction();
         current_avg_scanned_records =
             current_scan_fraction * static_cast<float>(std::max<int64_t>(0, partition_manager_->ntotal()));
@@ -1301,7 +1328,16 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                         native_split_candidate_count++;
                     }
                     bool split_candidate_deferred = false;
-                    if (cxl_use_resource_rent_buy()) {
+                    if (cxl_use_search_guarded_plus() &&
+                        !search_guarded_has_prior_price) {
+                        // A missing completed price window disables only the
+                        // CXL increment. Preserve Quake's native split exactly.
+                        if (native_should_split) {
+                            partitions_to_split.push_back(partition_id);
+                            choose_partition = true;
+                        }
+                        split_candidate_deferred = true;
+                    } else if (cxl_use_resource_rent_buy()) {
                         int child_size = std::max(1, (partition_size + 1) / 2);
                         float child_probe_factor = std::min(
                             2.0f,
@@ -1402,9 +1438,7 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                              default_plus_growth_candidate);
                         const bool guarded_has_prior_price =
                             cxl_use_search_guarded_plus() &&
-                            cxl_resource_price_snapshot_ != nullptr &&
-                            cxl_resource_price_snapshot_->valid &&
-                            cxl_resource_price_snapshot_->window_duration_ns > 0;
+                            search_guarded_has_prior_price;
                         const bool search_guarded_candidate =
                             cxl_use_search_guarded_plus() &&
                             (native_should_split ||
@@ -1868,8 +1902,9 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                         const string parent_link =
                             "link:" +
                             std::to_string(
-                                cxl_resource_home_id(
-                                    candidate.partition_id));
+                                device_for_home(
+                                    cxl_resource_home_id(
+                                        candidate.partition_id)));
                         if (cxl_resource_price_snapshot_ != nullptr) {
                             for (const auto& resource :
                                  cxl_resource_price_snapshot_->
@@ -1879,15 +1914,14 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                                         parent_home ||
                                     resource.resource_id ==
                                         parent_link;
-                                if (!affected ||
-                                    resource.utilization <= 0.0f ||
-                                    resource.demand_bytes <= 0) {
+                                if (!affected) {
                                     continue;
                                 }
                                 const float capacity_bytes =
-                                    static_cast<float>(
-                                        resource.demand_bytes) /
-                                    resource.utilization;
+                                    resource_capacity_bytes(resource);
+                                if (capacity_bytes <= 0.0f) {
+                                    continue;
+                                }
                                 const float projected =
                                     resource.utilization +
                                     (added_bytes_by_resource[
@@ -2004,17 +2038,19 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                             const string parent_home = "mc:" +
                                 std::to_string(cxl_resource_home_id(candidate.partition_id));
                             const string parent_link = "link:" +
-                                std::to_string(cxl_resource_home_id(candidate.partition_id));
+                                std::to_string(device_for_home(
+                                    cxl_resource_home_id(candidate.partition_id)));
                             for (const auto& resource : cxl_resource_price_snapshot_->resources) {
                                 const bool affected = resource.resource_id == parent_home ||
                                     resource.resource_id == parent_link;
-                                if (!affected || resource.utilization <= 0.0f ||
-                                    resource.demand_bytes <= 0) {
+                                if (!affected) {
                                     continue;
                                 }
                                 const float capacity_bytes =
-                                    static_cast<float>(resource.demand_bytes) /
-                                    resource.utilization;
+                                    resource_capacity_bytes(resource);
+                                if (capacity_bytes <= 0.0f) {
+                                    continue;
+                                }
                                 const float projected = resource.utilization +
                                     (added_bytes_by_resource[resource.resource_id] + logical_bytes) /
                                         std::max(1.0f, capacity_bytes);
@@ -2042,7 +2078,8 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                         const string parent_home = "mc:" +
                             std::to_string(cxl_resource_home_id(candidate.partition_id));
                         const string parent_link = "link:" +
-                            std::to_string(cxl_resource_home_id(candidate.partition_id));
+                            std::to_string(device_for_home(
+                                cxl_resource_home_id(candidate.partition_id)));
                         added_bytes_by_resource[parent_home] += logical_bytes;
                         added_bytes_by_resource[parent_link] += logical_bytes;
                     }
@@ -2099,11 +2136,9 @@ shared_ptr<MaintenanceTimingInfo> MaintenancePolicy::perform_maintenance() {
                                     continue;
                                 }
                                 float projected = resource.utilization;
-                                if (resource.utilization > 0.0f &&
-                                    resource.demand_bytes > 0) {
-                                    float capacity_bytes =
-                                        static_cast<float>(resource.demand_bytes) /
-                                        resource.utilization;
+                                float capacity_bytes =
+                                    resource_capacity_bytes(resource);
+                                if (capacity_bytes > 0.0f) {
                                     projected = next_utilization[resource.resource_id] +
                                         logical_bytes / std::max(1.0f, capacity_bytes);
                                 }
